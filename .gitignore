@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local secrets and generated artefacts, never committed
+*.key
+*.keytab
+*.bak
+
+# Site parameter files. server/install/site.env.example is the committed template and
+# holds placeholders only; a filled-in copy names real hosts, a real realm and
+# real contact addresses, none of which belong in a repo being prepared for
+# public release. The negation keeps the template itself tracked, since the
+# bare site.env rule below would otherwise not match it but a future rename
+# might.
+site.env
+**/site.env
+etc/mcp-server/site.env
+!server/install/site.env.example
+
+# Local secrets and credentials that tend to land in a working tree during a
+# real install. None of these are ever inputs to the repo.
+*.pem
+*.crt.local
+ccache
+krb5cc_*
+*.ccache
+
+# Staging directory some operators use when preparing the client bundle for a
+# host that serves it. Building and serving that copy live outside this repo, and
+# a copy in the tree would carry site-specific values.
+dist/
+
+# per-site page values (generated; ship config.example.js instead)
+client/web/config.js

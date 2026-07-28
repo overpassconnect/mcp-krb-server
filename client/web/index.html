@@ -1,0 +1,378 @@
+<!doctype html>
+<!--
+  Machine provisioning page. STATIC FILE: no build step, no placeholder
+  substitution, nothing rendered. Edit it directly and it is done.
+
+  Site values (realm, domain, KDC, org name, support email) come from config.js
+  at runtime, read by app.js. The download URL is NOT configured anywhere: the
+  page infers it from where it is served (location), so the same bundle works
+  from whatever host you copy it to. See config.example.js for the shape.
+
+  Nothing site-specific belongs in THIS file. It may be public. Realm-shaped
+  strings you see below (__REALM__, __DOMAIN__, __KDC__, __MCP_URL__,
+  __CA_SHA256__, __DNS_IP__, __BASE__) are markers app.js replaces in the
+  browser. There is no signing chain: transport is TLS and TLS alone, so
+  whoever serves this controls what runs on the workstation. See SECURITY.md [SC1].
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Machine provisioning</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #16181d; --muted: #6b7280; --line: #e3e6ea;
+    --card: #ffffff; --bg: #f7f8fa; --accent: #4440db; --code: #f2f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e6e8ec; --muted: #9aa3af; --line: #2a2f37;
+            --card: #16181d; --bg: #0e1013; --code: #1c1f26; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .bar { max-width: 860px; margin: 0 auto; padding: 1.5rem 1.25rem .2rem;
+         display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .bar img { height: 30px; display: block; }
+  .bar .welcome { margin: 0; color: var(--muted); font-size: 14px; }
+  .bar .on-dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .bar .on-light { display: none; }
+    .bar .on-dark { display: block; }
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.55rem; margin: .2rem 0 .3rem; letter-spacing: -.01em; }
+  .lede { color: var(--muted); margin: 0 0 1.6rem; }
+
+  nav.os { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.8rem; }
+  nav.os a { display: inline-flex; align-items: center; gap: .5rem;
+             padding: .5rem .9rem; border: 1px solid var(--line); border-radius: 5px;
+             text-decoration: none; color: var(--fg); background: var(--card); font-size: 14px; }
+  nav.os a.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent);
+                font-weight: 600; }
+
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 5px;
+            padding: 1.3rem 1.4rem; margin-bottom: 1.1rem; }
+  section h2 { display: flex; align-items: center; gap: .55rem;
+               font-size: 1.12rem; margin: 0 0 .2rem; }
+  section h3 { font-size: .95rem; margin: 1.5rem 0 .2rem; }
+  .tag { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+         color: var(--accent); border: 1px solid var(--accent); border-radius: 3px;
+         padding: .05rem .35rem; margin-left: .2rem; }
+  .tag.pending { color: var(--muted); border-color: var(--line); }
+  section.pending { border-style: dashed; }
+  .note { color: var(--muted); font-size: 14px; margin: .1rem 0 1rem; }
+  pre { position: relative; background: var(--code); padding: .85rem 2.6rem .85rem 1rem;
+        border-radius: 4px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; margin: .7rem 0; }
+  .copy { position: absolute; top: .4rem; right: .4rem; display: inline-flex;
+          align-items: center; justify-content: center; width: 28px; height: 28px;
+          padding: 0; border: 1px solid var(--line); border-radius: 4px; cursor: pointer;
+          background: var(--card); color: var(--muted); }
+  .copy:hover { color: var(--fg); border-color: var(--accent); }
+  .copy.ok { color: #26c485; border-color: #26c485; }
+
+  .fill { display: flex; flex-wrap: wrap; gap: .6rem; margin: .2rem 0 .1rem; }
+  .fill label { display: flex; flex-direction: column; gap: .25rem;
+                font-size: 12px; color: var(--muted); flex: 1 1 240px; }
+  .fill input { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+                padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 4px;
+                background: var(--bg); color: var(--fg); }
+  .fill input:focus { outline: none; border-color: var(--accent); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .sep { display: flex; align-items: center; gap: .8rem; color: var(--muted);
+         font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin: 1.9rem 0 1.1rem; }
+  .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .rule { height: 1px; background: var(--line); margin: 2.4rem 0 1.4rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: .4rem; }
+  th, td { text-align: left; padding: .45rem .3rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; }
+  a { color: var(--accent); }
+  .help { margin-top: 2.2rem; border-top: 1px solid var(--line); padding-top: 1rem;
+          color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <p class="welcome">Welcome</p>
+  <img class="on-light" src="logo.png" alt="" data-alt-org>
+  <img class="on-dark" src="logo-white.png" alt="" data-alt-org>
+</div>
+
+<div class="wrap">
+  <h1>Machine provisioning</h1>
+  <p class="lede">Set your workstation up for Kerberos single sign-on against
+  <code>__REALM__</code>.</p>
+
+  <nav class="os">
+    <a class="on" href="#linux">Linux</a>
+    <a href="#windows">Windows</a>
+    <a href="#macos">macOS (manual)</a>
+  </nav>
+
+  <section id="linux">
+    <h2>Linux<span class="tag">default</span></h2>
+    <p class="note">Enrols the machine in FreeIPA and installs the MCP bridge. After this you
+    get a Kerberos ticket at login, and <code>ssh</code> works with no password anywhere in the
+    realm. Ask whoever runs FreeIPA to run <code>ipa host-add yourbox.__DOMAIN__ --random</code>
+    first: it prints the one-time password you paste below, and it is good for one enrolment
+    only.</p>
+
+    <p class="note">If <code>/etc/ipa/default.conf</code> already exists the machine is
+    enrolled: skip the enrolment entirely and use the second block, which installs the bridge
+    only.</p>
+
+    <h3>Case 1: the machine is not enrolled yet</h3>
+    <div class="fill" data-fill="linux-cmd">
+      <label>Hostname IT gave you
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;the FQDN IT gave you&gt;"
+               placeholder="yourbox">
+      </label>
+      <label>One-time password
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;OTP&gt;"
+               placeholder="paste the OTP">
+      </label>
+    </div>
+<pre><code id="linux-cmd">cd "$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup.sh -o setup.sh
+
+sudo sh setup.sh \
+    --base-url __BASE__ \
+    --mcp-url __MCP_URL__ \
+    --hostname=&lt;the FQDN IT gave you&gt; \
+    --server=__KDC__ \
+    --domain=__DOMAIN__ \
+    --realm=__REALM__ \
+    --password='&lt;OTP&gt;' \
+    --unattended</code></pre>
+
+    <h3>Case 2: the machine is already enrolled</h3>
+<pre><code id="linux-cmd-enrolled">cd "$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsS __BASE__/install-bridge.sh -o install-bridge.sh
+
+sudo sh install-bridge.sh \
+    --base-url __BASE__ \
+    --mcp-url __MCP_URL__ \
+    --managed</code></pre>
+
+    <p class="note">Both blocks download the script to a file and then run it, instead of piping
+    <code>curl</code> into <code>sh</code>, so a truncated or interrupted download cannot
+    half-execute as root. <code>--proto '=https'</code> pins the transfer to HTTPS so a redirect
+    cannot silently downgrade it to plaintext.</p>
+
+    <p class="note">TLS is the whole of the assurance on these bytes. There is no signature and
+    no checksum file to verify. Once the machine is enrolled the scripts pin their own downloads
+    to the realm CA at <code>/etc/ipa/ca.crt</code> and warn loudly if that pin ever falls back
+    to the public trust store, but the first fetch above is ordinary public-CA TLS. Whoever
+    controls the host serving these files decides what runs as root here: SECURITY.md&nbsp;[SC1].
+    If that is in your threat model, ship a signed package from an internal repo in your base
+    image instead.</p>
+
+    <p class="note">Extras: <code>--skip-mcp</code> enrols in FreeIPA only, leaving the bridge
+    for later. Drop <code>--managed</code> from the second block to install the bridge without
+    registering it machine-wide; the script then prints the <code>claude mcp add</code> line to
+    run as yourself. Drop <code>--unattended</code> from the first block if you would rather
+    confirm the enrolment interactively.</p>
+  </section>
+
+  <div class="sep">other platforms</div>
+
+  <section id="windows">
+    <h2>Windows 11</h2>
+    <p class="note">Windows' built-in <code>ssh.exe</code> cannot read a Kerberos ticket, so the
+    client runs inside WSL2. <strong>Open PowerShell as Administrator</strong>: installing the
+    WSL distro needs it. If a distro already exists that step is skipped, but start elevated
+    anyway so the run does not stop halfway.</p>
+
+    <h3>Kerberos SSH only</h3>
+    <p class="note">One file, nothing else to download. This is what most people want. The realm
+    values below are already filled in for you, so the only thing to edit is your username.</p>
+    <div class="fill" data-fill="win-cmd">
+      <label>Your IPA username
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;your-ipa-username&gt;"
+               placeholder="jdoe">
+      </label>
+    </div>
+<pre><code id="win-cmd"># Run PowerShell as Administrator.
+$base = "__BASE__"
+iwr -useb "$base/setup.ps1" -OutFile setup.ps1
+
+.\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
+    -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
+    -SkipVSCode</code></pre>
+    <p class="note">Afterwards, in a <em>new</em> terminal:
+    <code>wsl kinit &lt;your-ipa-username&gt;@__REALM__</code>, then
+    <code>wslssh host.__DOMAIN__</code>. Your existing <code>ssh</code>, keys, host aliases and
+    <code>known_hosts</code> are left untouched: the script adds <code>wslssh</code> rather than
+    hijacking <code>ssh</code>. Tickets last 24 hours and renew with <code>wsl kinit -R</code>.</p>
+
+    <h3>With VS Code Remote-SSH</h3>
+    <p class="note">Drop <code>-SkipVSCode</code> and the script also points VS Code's
+    <code>remote.SSH.path</code> at a dispatcher, so <code>*.__DOMAIN__</code> goes through WSL
+    and every other host keeps using the native Windows <code>ssh</code>. One profile, both
+    worlds. This is the only step that needs <code>JsoncEdit.ps1</code>, so either put that file
+    next to <code>setup.ps1</code> or pass <code>-BaseUrl</code> and let the script fetch it.</p>
+    <div class="fill" data-fill="win-cmd-code">
+      <label>Your IPA username
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;your-ipa-username&gt;"
+               placeholder="jdoe">
+      </label>
+    </div>
+<pre><code id="win-cmd-code"># Run PowerShell as Administrator.
+$base = "__BASE__"
+iwr -useb "$base/setup.ps1" -OutFile setup.ps1
+
+.\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
+    -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
+    -BaseUrl __BASE__</code></pre>
+
+    <h3>Optional: the MCP bridge</h3>
+    <p class="note">Only if you have been asked to run it. Add
+    <code>-McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__</code> to either command above, and
+    <code>-BaseUrl __BASE__</code> as well <em>only to the first one</em>: the second already
+    passes <code>-BaseUrl</code>, and PowerShell refuses a parameter given twice.
+    All three are needed together: <code>-BaseUrl</code> is where the installer is fetched from,
+    <code>-McpUrl</code> is the API the bridge talks to, and the CA hash is what makes that fetch
+    verifiable. Take the hash from <code>sha256sum /etc/ipa/ca.crt</code> on any enrolled host,
+    or from IT, rather than trusting the copy printed here. Without <code>-McpUrl</code> the
+    workstation is SSH-only and nothing MCP-related is installed.</p>
+
+    <p class="note">The script downloads over TLS and that is the whole of the assurance: there
+    is no signature and nothing to verify by hand. A host that serves these files and is
+    compromised serves whatever it likes: SECURITY.md&nbsp;[SC1]. Nothing else on the workstation
+    is modified.</p>
+
+    <p class="note">No WSL2 at all and the install stalls? Once, elevated:
+    <code>wsl --install -d Ubuntu-24.04</code>, launch it once to create your Linux user, reboot
+    if asked, then re-run. The script is idempotent, so a second run is safe.</p>
+  </section>
+
+  <section id="macos" class="pending">
+    <h2>macOS<span class="tag pending">manual</span></h2>
+
+    <p class="note"><strong>There is no macOS script.</strong> Linux gets a real FreeIPA
+    enrolment from <code>setup.sh</code> and Windows gets <code>setup.ps1</code>; a Mac gets
+    neither. What follows is a hand-written faux-enrolment: it configures the Kerberos client
+    only, it does not join the machine to the realm, and nothing about it is automated or
+    idempotent. It was worked out and proven on a live Mac, so it works, but treat it as a
+    procedure you read rather than a command you paste blindly.</p>
+
+    <p class="note"><strong>Read this before you debug anything.</strong> The KDC line must be
+    <code>kdc = tcp/__KDC__</code>, with the <code>tcp/</code> prefix. macOS ships
+    <strong>Heimdal</strong>, not MIT Kerberos, and Heimdal has no
+    <code>udp_preference_limit</code>. Over UDP the KDC issues your ticket and the oversized
+    reply is then dropped by any VPN with a small MTU, so the client tells you
+    <em>"unable to reach any KDC in realm"</em> about a KDC that already answered. The error
+    points nowhere near the cause. This one prefix is the difference between a working Mac and
+    a lost afternoon.</p>
+
+    <div class="fill" data-fill="mac-cmd">
+      <label>Your IPA username
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;your-ipa-username&gt;"
+               placeholder="jdoe">
+      </label>
+    </div>
+<pre><code id="mac-cmd"># 1. Split DNS: send realm lookups to the realm's resolver.
+sudo mkdir -p /etc/resolver
+printf 'nameserver __DNS_IP__\n' | sudo tee /etc/resolver/__DOMAIN__ &gt;/dev/null
+
+# 2. Kerberos. Note "kdc = tcp/" below: macOS ships Heimdal, which has no
+#    udp_preference_limit. Without the tcp/ prefix the KDC issues the ticket,
+#    the oversized UDP reply is dropped on a small-MTU VPN, and the client
+#    reports "unable to reach any KDC in realm" long after it was reached.
+sudo tee /etc/krb5.conf &gt;/dev/null &lt;&lt;'CONF'
+[libdefaults]
+    default_realm = __REALM__
+    dns_lookup_realm = false
+    dns_lookup_kdc = false
+    rdns = false
+    ticket_lifetime = 24h
+    renew_lifetime = 7d
+    forwardable = false
+
+[realms]
+    __REALM__ = {
+        kdc = tcp/__KDC__
+        admin_server = __KDC__
+        default_domain = __DOMAIN__
+    }
+
+[domain_realm]
+    .__DOMAIN__ = __REALM__
+    __DOMAIN__ = __REALM__
+CONF
+
+# 3. SSH over GSSAPI. Delegation stays off on purpose: SECURITY.md [CL1].
+mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh
+cat &gt;&gt; ~/.ssh/config &lt;&lt;'CONF'
+Host *.__DOMAIN__
+    User &lt;your-ipa-username&gt;
+    GSSAPIAuthentication yes
+    GSSAPIDelegateCredentials no
+CONF
+chmod 600 ~/.ssh/config
+
+# 4. Get a ticket. klist -v is the Heimdal spelling, not klist -f.
+kinit &lt;your-ipa-username&gt;@__REALM__
+klist -v</code></pre>
+
+    <p class="note">Then <code>ssh anything.__DOMAIN__</code> with no password. Re-run
+    <code>kinit</code> when the ticket expires, about once a day.
+    <code>klist -v</code> prints the flags; <code>klist -f</code> is the MIT spelling and is
+    not what this Kerberos understands.</p>
+
+    <p class="note"><strong>forwardable is false, deliberately.</strong> A non-forwardable
+    ticket cannot be delegated even by a client that asks to, which pairs with
+    <code>GSSAPIDelegateCredentials no</code> above. Turn it on only if you are doing
+    SECURITY.md&nbsp;[D1] on-behalf-of forwarding. For SSH it buys nothing and costs the
+    stronger posture.</p>
+
+    <p class="note"><strong>The realm CA is optional and most people do not need it.</strong>
+    <code>kinit</code> and <code>ssh</code> do not use it at all: GSSAPI and host keys carry
+    that. You need it only for HTTPS to <code>__MCP_URL__</code>. If you want it, fetch it,
+    check the hash against the value IT gave you <em>out of band</em> (not from this page,
+    which is served by the same infrastructure), and only then trust it:</p>
+<pre><code>curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
+shasum -a 256 /tmp/realm-ca.crt          # must equal __CA_SHA256__
+sudo security add-trusted-cert -d -r trustRoot \
+     -k /Library/Keychains/System.keychain /tmp/realm-ca.crt</code></pre>
+
+    <p class="note">That fetch is plain HTTP, so the hash comparison is the entire check. If
+    it does not match, stop and talk to IT rather than installing it anyway.</p>
+
+    <p class="note">The MCP bridge is not part of this. It is installed on Linux by
+    <code>install-bridge.sh</code> and on Windows by <code>setup.ps1 -McpUrl</code>; there is no
+    macOS path for it yet. Ask IT if you need one on a Mac.</p>
+  </section>
+
+  <div class="rule"></div>
+
+  <section>
+    <h2>Artifacts</h2>
+    <p class="note">Five files, flat, and that is the whole set. Nothing here is signed. There
+    is no checksum manifest and no signature to check: transport is TLS and TLS alone, so
+    whoever controls this host controls what runs on your machine. That trade is written up in
+    SECURITY.md&nbsp;[SC1].</p>
+    <table>
+      <tr><th>File</th><th>Platform</th></tr>
+      <tr><td><a data-file="setup.sh">setup.sh</a></td><td>Linux, FreeIPA enrolment then bridge install</td></tr>
+      <tr><td><a data-file="install-bridge.sh">install-bridge.sh</a></td><td>Linux, bridge install on an already-enrolled machine</td></tr>
+      <tr><td><a data-file="setup.ps1">setup.ps1</a></td><td>Windows, Kerberos SSH via WSL2, and VS Code</td></tr>
+      <tr><td><a data-file="JsoncEdit.ps1">JsoncEdit.ps1</a></td><td>Windows, fetched by setup.ps1 for the VS Code step only</td></tr>
+      <tr><td><a data-file="mcp-krb-bridge.py">mcp-krb-bridge.py</a></td><td>the MCP bridge itself, fetched by the installers</td></tr>
+    </table>
+  </section>
+
+  <p class="help">Need help? <a class="help-mail" href="#">contact your IT team</a></p>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

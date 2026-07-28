@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "internal-tools": {
+      "type": "stdio",
+      "command": "/usr/bin/python3",
+      "args": ["/opt/mcp-krb/mcp-krb-bridge.py", "https://mcp.example.internal/"]
+    }
+  }
+}

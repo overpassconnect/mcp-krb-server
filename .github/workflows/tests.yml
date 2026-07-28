@@ -1,0 +1,33 @@
+# Runs the unit tests on every push and pull request.
+#
+# The suite is hermetic: a fake gssapi stands in for python3-gssapi, so it needs
+# no KDC, no native packages and no MCP SDK. That is why this workflow installs
+# nothing. Both platforms are exercised because the client kit is authored on
+# Windows and executed on Linux, and the tests are the only thing that checks the
+# same source behaves on both.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # bash on both runners: Windows images ship Git Bash, so one command covers
+      # the matrix and the script itself stays POSIX sh.
+      - name: unit tests
+        shell: bash
+        run: sh tests/run-tests.sh

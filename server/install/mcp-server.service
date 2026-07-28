@@ -1,0 +1,134 @@
+# /etc/systemd/system/mcp-server.service - Kerberized Python MCP server.
+[Unit]
+Description=Internal MCP server (Kerberos/SPNEGO via FreeIPA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcp
+Group=mcp
+WorkingDirectory=/opt/mcp-server
+# User=mcp / Group=mcp are provisioned by server/install/run.sh.
+# systemd refuses to start the unit with
+# 'Failed to determine user credentials: No such process' if they are missing.
+#
+# Runs uvicorn (mcp_server.main) out of the venv at /opt/mcp-venv, NOT the
+# system interpreter: /usr/bin/python3 cannot `import mcp`, so a fresh install
+# pointed at it starts and immediately dies.
+#
+# That venv MUST be created with --system-site-packages:
+#   python3 -m venv --system-site-packages /opt/mcp-venv
+# python3-gssapi is an OS package (it arrives with ipa-client) and is not
+# reliably pip-installable here, while mcp and uvicorn are pip-only. An
+# isolated venv therefore yields a server that starts fine and then fails
+# every SPNEGO handshake on `import gssapi`. See requirements.txt.
+#
+# run.sh renders this file by substituting VALUES only (the
+# ExecStart line below, the SPN host, the realm) and never rewrites or strips
+# these comments. They record the failures each setting prevents.
+ExecStart=/opt/mcp-venv/bin/python /opt/mcp-server/mcp_server.py
+Restart=on-failure
+
+Environment=MCP_SPN=HTTP@mcp.example.internal
+Environment=MCP_LISTEN=/run/mcp-server/mcp.sock
+# Realm gate read by authz.py (must match the SPN above).
+Environment=MCP_REALM=EXAMPLE.INTERNAL
+RuntimeDirectory=mcp-server
+# 0755, NOT 0750: nginx (www-data) must traverse this directory to reach the
+# socket. With 0750 the socket exists but nginx fails with 502 'No such file or
+# directory', which is a confusing way to say 'permission denied on the parent'.
+RuntimeDirectoryMode=0755
+
+# --- OPTIONAL authz policy editor (DISABLED BY DEFAULT; see SECURITY.md) -----
+# Uncomment ALL FOUR to expose the browser editor for the per-tool IPA-group
+# policy. It writes a schema-validated JSON overlay (merged OVER the reviewed
+# in-code defaults, which remain the fail-safe floor) into StateDirectory below,
+# and is gated to the exact policy-admin principals (NOT an IPA group). Also
+# uncomment the matching nginx `location /admin/` block and the StateDirectory.
+# On-behalf-of forwarding to a downstream service, SECURITY.md [D1]. Commented
+# out because enabling it is a security decision: it narrows [C2] by making the
+# keytab usable for OUTBOUND authentication, and it raises what a stolen keytab is
+# worth under [K1]. It also needs a FreeIPA servicedelegationrule and callers with
+# FORWARDABLE tickets, neither of which this unit can arrange.
+# Environment=MCP_DELEGATION=1
+# Which downstream service each forwarding tool may reach, as
+# 'tool=svc@fqdn[,tool=svc@fqdn]'. run.sh writes this from MCP_DELEGATION_TARGETS
+# in site.env. It is the ONLY limit that holds against a hostile client: the KDC's
+# own target allowlist is a backstop that a caller who forwards a TGT removes.
+# Read SECURITY.md [D1] before adding a row. Root-owned on purpose.
+# Environment=MCP_DELEGATION_TARGETS=
+# Environment=MCP_AUTHZ_EDITOR=1
+# Environment=MCP_POLICY_ADMINS=alice@EXAMPLE.INTERNAL,bob@EXAMPLE.INTERNAL
+# Environment=MCP_POLICY_FILE=/var/lib/mcp-server/tool-groups.json
+# Environment=MCP_PUBLIC_ORIGIN=https://mcp.example.internal
+# A writable, NON-code state dir keeps ProtectSystem=strict (code stays read-only);
+# systemd creates /var/lib/mcp-server owned by mcp and adds it to ReadWritePaths.
+# StateDirectory=mcp-server
+# StateDirectoryMode=0750
+
+# --- GSSAPI acceptor credentials -------------------------------------------
+# The acceptor opens the keytab itself. The keytab AND its directory must be
+# group-readable by the service user:
+#   chown root:mcp /etc/mcp-server /etc/mcp-server/krb5.keytab
+#   chmod 0750 /etc/mcp-server ; chmod 0640 /etc/mcp-server/krb5.keytab
+# A 0750 root:root directory makes gssapi fail with the opaque
+# 'MissingCredentialsError ... Minor (13): Permission denied', which names
+# neither the file nor the permission. Do not tighten these to root:root or
+# 0400: the service user must be able to read the keytab.
+Environment=KRB5_KTNAME=/etc/mcp-server/krb5.keytab
+# Tighten the proxy socket once uvicorn has created it. The '+' prefix runs this
+# as ROOT regardless of User=, which is the only way to set the group here: the
+# sandbox below leaves the service with an empty CapabilityBoundingSet and
+# NoNewPrivileges=yes, so it holds no CAP_CHOWN.
+#
+# WHY IT MATTERS: uvicorn creates a unix socket at mode 0666. Any local account
+# that can traverse /run/mcp-server can then speak HTTP straight to the app,
+# skipping nginx's rate limit, its 1 MB body cap, and the X-Forwarded-For
+# overwrite that makes the audited source address trustworthy. SPNEGO is still
+# required, so this is audit integrity and DoS rather than an auth bypass, but on
+# an IPA-joined host every domain user with a shell is a local account.
+#
+# The group is rendered by run.sh: www-data on Debian and Ubuntu, nginx on RHEL.
+# The loop waits because ExecStartPost fires as soon as the process forks, which
+# is a second or two before uvicorn binds.
+ExecStartPost=+/bin/sh -c 'n=0; while [ $n -lt 50 ]; do [ -S "$MCP_LISTEN" ] && break; sleep 0.1; n=$((n+1)); done; [ -S "$MCP_LISTEN" ] || exit 0; chgrp {{NGINX_GROUP}} "$MCP_LISTEN" && chmod 0660 "$MCP_LISTEN"'
+
+
+# --- replay protection: ON (secure default) --------------------------------
+# The stdio bridge mints a fresh token per request, so the replay
+# cache accepts them normally. Do NOT set KRB5RCACHETYPE=none (RFC 4120 MUST;
+# SECURITY.md [R1]). If rcache lock/perf ever bites, put it on tmpfs:
+# Environment=KRB5RCACHEDIR=/run/mcp-server
+
+# --- process sandboxing (defense-in-depth) ---------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# CPython has no JIT, so W^X is safe - verified with gssapi + the full sandbox.
+# The SDK stack (uvicorn/starlette pure-Python, pydantic-core compiled Rust) is
+# also JIT-free; verify this exact combo starts on first boot and set to no if not.
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ReadWritePaths=/run/mcp-server
+ReadOnlyPaths=/etc/mcp-server
+
+[Install]
+WantedBy=multi-user.target

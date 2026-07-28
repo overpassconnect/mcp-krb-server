@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "internal-tools": {
+      "type": "stdio",
+      "command": "wsl.exe",
+      "args": ["-e", "/usr/bin/python3", "/opt/mcp-krb/mcp-krb-bridge.py", "https://mcp.example.internal/"]
+    }
+  }
+}

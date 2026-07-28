@@ -1,0 +1,162 @@
+# Hardened TLS front for the Python MCP server. Two supported placements:
+#   Debian/Ubuntu (the layout actually deployed):
+#       /etc/nginx/sites-available/mcp, symlinked into /etc/nginx/sites-enabled/mcp
+#   RHEL family:
+#       /etc/nginx/conf.d/mcp.conf
+# server/install/run.sh picks the layout by testing for /etc/nginx/sites-available.
+#
+# nginx does TLS + proxying ONLY; Kerberos/SPNEGO validation is in the Python app
+# (spnego_auth.py). The client's Authorization header is forwarded by default and
+# is NEVER logged (a captured Negotiate token is replayable within the skew window).
+#
+# PLACEHOLDER CONVENTION: every site value in this file is an explicit
+# double-underscore token. run.sh substitutes the host name, the
+# certificate directory and the ACME webroot, then ASSERTS that no unsubstituted
+# token survives in the installed file. That assertion is a plain regex over the
+# whole file, so do not write an example token in prose here; it would be
+# flagged, and the substitution would rewrite the prose as well.
+#
+# Do not replace a token with a literal example hostname "so it looks like a
+# config": a literal is substituted by pattern matching, which cannot prove that
+# it matched anything, and that is exactly how the certificate directory and the
+# ACME webroot drifted apart from what certbot was invoked with.
+
+limit_req_zone  $binary_remote_addr zone=mcp_auth:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=mcp_conn:10m;
+
+log_format mcp_noauth '$remote_addr - [$time_local] "$request" $status '
+                      '$body_bytes_sent "$http_user_agent"';
+
+server {
+    # `http2 on;` requires nginx >= 1.25.1; Ubuntu 24.04 ships 1.24 where nginx
+    # refuses to start with "unknown directive". This form works on both.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{MCP_FQDN}};
+
+    # {{CERTDIR}} is the DIRECTORY, not the lineage name. It is normally
+    # /etc/letsencrypt/live/<MCP_CERT_NAME>/, which is NOT always
+    # /etc/letsencrypt/live/<MCP_FQDN>/: MCP_CERT_NAME may differ from MCP_HOST,
+    # and --cert-mode existing --cert-path points somewhere else entirely.
+    # Substituting the hostname alone here produced a vhost pointing at a
+    # directory nothing had ever written a certificate into.
+    ssl_certificate     {{CERTDIR}}/fullchain.pem;
+    ssl_certificate_key {{CERTDIR}}/privkey.pem;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache   shared:MCPSSL:10m;
+    ssl_session_tickets off;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'none'; frame-ancestors 'none'" always;
+
+    access_log /var/log/nginx/mcp.access.log mcp_noauth;
+
+    client_max_body_size 1m;
+    client_body_timeout  30s;
+    client_header_timeout 15s;
+
+    # SERVER-LEVEL DEFAULT LIMITS. Unlike add_header, limit_req and limit_conn ARE
+    # inherited by any location that does not define its own, and a location that
+    # does define one replaces this rather than adding to it. So `location /` and
+    # the /admin/ block below keep their own tuned values, and the only location
+    # that carries none - the spliced, deliberately UNAUTHENTICATED client
+    # distribution location - inherits these instead of being unlimited. It is the
+    # single location reachable without a Kerberos ticket, so it must not be the
+    # one place with no rate or connection cap. Deliberately tighter than
+    # `location /`: it serves a handful of small static provisioning files, an
+    # unauthenticated client has no reason to burst, and a machine being
+    # provisioned fetches each file once.
+    limit_req  zone=mcp_auth burst=10 nodelay;
+    limit_conn mcp_conn 10;
+
+    # --- OPTIONAL authz policy editor (DISABLED BY DEFAULT) ------------------
+    # Uncomment to expose the browser policy editor. It is ALSO gated server-side
+    # (MCP_AUTHZ_EDITOR + the policy-admin allowlist), so leaving this commented
+    # OR the env unset both keep it off. Defining add_header in this block breaks
+    # inheritance of the strict server-level CSP, so the app can supply its own
+    # per-response nonce CSP for just this page (needed for the editor's inline
+    # script/style). Body is capped much tighter than the MCP endpoint.
+    # location ^~ /admin/ {
+    #     limit_req  zone=mcp_auth burst=10 nodelay;
+    #     limit_conn mcp_conn 10;
+    #     client_max_body_size 64k;
+    #     add_header Strict-Transport-Security "max-age=63072000" always;
+    #     add_header X-Content-Type-Options "nosniff" always;
+    #     # No CSP here on purpose: the app emits a per-response nonce CSP.
+    #     proxy_pass http://unix:/run/mcp-server/mcp.sock;
+    #     proxy_http_version 1.1;
+    #     proxy_set_header Connection "";
+    #     proxy_set_header Host $host;
+    #     proxy_set_header X-Forwarded-Proto https;
+    #     proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, not append
+    #     proxy_set_header X-Real-IP $remote_addr;
+    #     proxy_buffering off;
+    #     proxy_cache off;
+    # }
+
+    # {{CLIENT_LOCATION}}
+    # run.sh replaces this marker with a static location serving the client
+    # bundle (the five files plus the provisioning page) at CLIENT_PATH. That is
+    # the DEFAULT; with --no-serve-client the marker becomes nothing and this
+    # host serves the API alone.
+    #
+    # WHY IT IS DELIBERATELY UNAUTHENTICATED, and why that is not a hole:
+    # nginx does not gate the API. The SPNEGO check lives in the application
+    # behind location / below, so a static location never reaches it. That is
+    # required rather than incidental: a machine being provisioned has no
+    # Kerberos ticket yet, so anything it must fetch to GET one cannot itself
+    # demand one. The files are provisioning scripts, not secrets.
+    #
+    # ^~ so this wins over any regex location, and a prefix that cannot collide
+    # with the MCP protocol paths proxied below.
+    #
+    # RATE/CONNECTION LIMITS: inherited from the server-level limit_req/limit_conn
+    # above, because the spliced block deliberately declares neither. Do not add a
+    # limit_req or limit_conn to the generated block without meaning to REPLACE the
+    # server-level values; nginx does not merge them.
+    #
+    # SECURITY HEADERS: the generated block sets `add_header Cache-Control ...`,
+    # and a location that declares ANY add_header stops inheriting ALL of the
+    # server-level ones. This location therefore serves without HSTS, nosniff or
+    # CSP, and it is the only unauthenticated location on the host. The generated
+    # block lives in the CLIENT_BLOCK heredoc in server/install/run.sh (section 7),
+    # not in this file, so it cannot be fixed from here: the three server-level
+    # add_header lines above must be restated inside that block, alongside the
+    # existing Cache-Control. Tracked as an open item; see the report for step (c).
+
+    location / {
+        limit_req  zone=mcp_auth burst=40 nodelay;
+        limit_conn mcp_conn 20;
+
+        proxy_pass http://unix:/run/mcp-server/mcp.sock;
+        # TCP-loopback alternative:  proxy_pass http://127.0.0.1:8831;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, not append 
+        proxy_set_header X-Real-IP $remote_addr;
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{MCP_FQDN}};
+
+    location ^~ /.well-known/acme-challenge/ { root {{WEBROOT}}; }
+    location / { return 308 https://$host$request_uri; }
+}

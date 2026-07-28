@@ -1,0 +1,38 @@
+# Server-only dependencies (the CLIENT bridge stays stdlib + python3-gssapi).
+#
+# THE VENV MUST BE CREATED WITH --system-site-packages:
+#     python3 -m venv --system-site-packages /opt/mcp-venv
+#     /opt/mcp-venv/bin/pip install -r requirements.lock.txt
+#
+# gssapi is deliberately ABSENT from this file. It is the OS package
+# python3-gssapi (pulled in by ipa-client), not a pip dependency. A plain
+# isolated venv therefore produces a server that starts cleanly and then fails
+# every SPNEGO handshake, because spnego_auth.py cannot `import gssapi`. mcp
+# and uvicorn are the opposite: pip-only, absent from the OS interpreter.
+# That split is the whole reason for --system-site-packages.
+#
+# Sanity gate before enabling the unit:
+#     /opt/mcp-venv/bin/python -c 'import gssapi, mcp, uvicorn'
+#
+# NOTE: internal VMs may lack direct PyPI access (verified: a test VM could not
+# `pip install`). Install from an internal PyPI mirror, a pre-built wheelhouse
+# (`pip download` on a connected box -> copy -> `pip install --no-index
+# --find-links ./wheels`), or package as an RPM. See ../SECURITY.md.
+#
+# These are the DIRECT deps, bounded to the validated majors. The exact
+# transitive tree that was validated on the live host is pinned in
+# requirements.lock.txt; prefer that for installs:
+#     pip install -r requirements.lock.txt
+#     pip install -r requirements.txt -c requirements.lock.txt
+# The upper bounds matter: mcp 2.x is a major break away from the API in
+# mcp_server.py.
+#
+# The mcp LOWER bound is a SECURITY floor, not a feature floor. `>=1.28` admits
+# 1.28.0, which is still affected by CVE-2026-59950; 1.28.1 is the first fixed
+# release. A bare minor bound silently allows the vulnerable patch release, so
+# the floor is pinned to the fixed patch. Do not relax it back to `>=1.28`.
+mcp>=1.28.1,<2
+uvicorn>=0.30,<1
+# (mcp pulls in starlette, anyio, pydantic v2, httpx; pydantic-core is compiled
+#  Rust, uvicorn/starlette are pure Python - all compatible with the systemd
+#  sandbox. Verify MemoryDenyWriteExecute=yes with this exact stack on first boot.)

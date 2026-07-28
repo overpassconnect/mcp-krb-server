@@ -1,0 +1,46 @@
+# Line endings are a correctness issue in this repo, not a style preference.
+#
+# client/install-bridge.sh and client/setup.sh are fetched over HTTPS from whatever host
+# serves the client bundle and run with /bin/sh. On Debian and Ubuntu that is
+# dash, and dash does not strip a trailing carriage return: a CRLF file makes the
+# very first line fail with "set: Illegal option -" and the installer aborts
+# before doing anything. This has already happened once and was repaired by hand
+# on the host, which is exactly the kind of undocumented manual fix this repo
+# exists to eliminate.
+#
+# The scripts are authored on Windows, so any clone with core.autocrlf=true
+# would silently reintroduce the fault on checkout. These rules pin the working
+# tree to LF regardless of the cloner's local git configuration, which is the one
+# guarantee that matters now that nothing re-checks the bytes at publish time.
+#
+# After adding or changing this file, run once, before committing:
+#     git add --renormalize .
+# Without that, files already staged with CRLF keep their stored line endings.
+
+# Default for anything not named below. Git decides what is text; text is LF.
+* text=auto eol=lf
+
+# Explicit rules for every text type actually present in the tree. Named
+# individually so a new file type does not quietly inherit an untested default.
+*.sh        text eol=lf
+*.py        text eol=lf
+*.nginx     text eol=lf
+*.service   text eol=lf
+*.json      text eol=lf
+*.js        text eol=lf
+*.html      text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.example   text eol=lf
+
+# PowerShell is LF here too, deliberately. Windows PowerShell 5.1 and
+# PowerShell 7 both read LF scripts correctly, and the copies served to
+# workstations are already LF. Keeping one rule for the whole tree avoids a second
+# class of file that the CR guards would have to exempt.
+*.ps1       text eol=lf
+
+# Binary: never line-ending converted, never diffed as text.
+*.png       binary
+*.ico       binary
+*.jpg       binary
+*.jpeg      binary

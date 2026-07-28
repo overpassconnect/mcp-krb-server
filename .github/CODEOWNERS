@@ -1,0 +1,23 @@
+# CODEOWNERS: required reviewers per path (GitHub enforces this on pull requests
+# once branch protection has "Require review from Code Owners" enabled).
+#
+# Both owners are listed, so either can approve. A pull request author cannot
+# approve their own, which is the point of naming two: one of them is always
+# available to review the other's change.
+#
+# A fork should repoint these at its own reviewers. An entry naming a handle that
+# does not exist, or an organisation rather than a user or a team, is silently
+# ignored, and the review it promises never happens.
+#
+# These are the security-owned files: a change here alters the authentication,
+# authorization, or on-behalf-of delegation trust model. Several of them carry a
+# "keep this file under CODEOWNERS" note in their own header; this file makes that
+# stated control real instead of aspirational. See SECURITY.md.
+
+/server/spnego_auth.py     @stamstergios @overpassconnect
+/server/spnego_asgi.py     @stamstergios @overpassconnect
+/server/authz.py           @stamstergios @overpassconnect
+/server/authz_editor.py    @stamstergios @overpassconnect
+/server/delegation.py      @stamstergios @overpassconnect
+/server/mcp_server.py      @stamstergios @overpassconnect
+/SECURITY.md               @stamstergios @overpassconnect

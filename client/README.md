@@ -1,0 +1,732 @@
+# Client setup
+
+Everything a workstation or server needs to talk to the Kerberized MCP server,
+plus (on Windows) passwordless SSH and VS Code Remote-SSH against FreeIPA hosts.
+
+## Where the files come from
+
+Five files have to be served over HTTPS so a workstation can bootstrap. Serving
+them is a role that any host can fill: by default the MCP host fills it at
+`https://mcp.example.internal/client`, and an exported copy can be served from
+anywhere.
+
+| File | What | Fetched by |
+|---|---|---|
+| `setup.sh` | Linux: enrol in FreeIPA, then install the MCP client | a human |
+| `setup.ps1` | Windows: WSL2 Kerberos, and optionally the MCP bridge | a human, or MDM |
+| `install-bridge.sh` | install the MCP bridge only | `setup.sh`, `setup.ps1`, or a human |
+| `JsoncEdit.ps1` | helper used by `setup.ps1` | `setup.ps1` |
+| `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
+
+### The MCP host serves them
+
+One box, two roles. A normal install sets up the vhost and lays the files down:
+
+```sh
+sudo sh server/install/run.sh --site-env /etc/mcp-server/site.env
+```
+
+Workstations then use `--base-url https://mcp.example.internal/client`. The path
+is configurable via `CLIENT_PATH` and defaults to `/client/`.
+
+The location is static and unauthenticated, which is required here: nginx does not
+gate the API (the SPNEGO check is in the application), and a machine being
+provisioned has no ticket yet, so anything it must fetch in order to get one cannot
+demand one. `verify.sh` check 12 treats a 401 here as a failure.
+
+Open item, not yet fixed: the generated client-distribution `location` block does
+not inherit the vhost's security headers. `add_header` is not inherited into a
+location that declares its own, so the hardening applied to the API surface stops
+at this block. See [NG1] in [SECURITY.md](../SECURITY.md).
+
+### Serving an exported bundle elsewhere
+
+You do not have to serve the bundle from the MCP host. Add `--client-export DIR`
+to the installer and it also writes the complete bundle (the five files, the
+provisioning page, and a generated `config.js`) into `DIR`:
+
+```sh
+sudo sh server/install/run.sh --client-export /var/www/client-bundle
+```
+
+Add `--no-serve-client` too if you do not want this host to serve it as well.
+Copying that directory off to whatever host will serve it is your own job, with
+your own tools. It is byte for byte what the MCP host serves, and the page reads
+its own download URL from wherever it ends up, so there is nothing per-host to
+configure. Point `--base-url` at that host.
+
+### Either way
+
+A plain copy is the whole job. There are no placeholders left in `client/` to
+substitute, nothing to render, nothing to sign. (The `{{TOKEN}}` placeholders that
+remain live in `server/install/` and are resolved on the MCP host at install time,
+which is unrelated.)
+
+Two obligations this repo cannot enforce: serve over HTTPS with a certificate that
+chains to the realm CA, or the client-side pin never engages; and guard write
+access to that directory as carefully as the KDC, because whatever sits there runs
+as root on every workstation.
+
+Two different URLs are involved on every path, and conflating them is the classic
+mistake:
+
+- the download base (`--base-url` / `-BaseUrl`) is where the bytes come from: the
+  MCP host by default, or whatever host serves an exported bundle;
+- the MCP URL (`--mcp-url` / `-McpUrl`) is what the installed bridge talks to, and
+  nothing is ever downloaded from that API endpoint. By default the same host also
+  publishes the kit at `CLIENT_PATH`, which is a different URL on the same machine
+  from the API endpoint.
+
+Neither has a default. A machine told to install the bridge and not told where to
+fetch it from is an operator error knowable from the command line, so it is
+refused before anything is mutated.
+
+## Trust model
+
+This is transport security only. There is no signature on anything here, and that
+is deliberate. The honest summary is short.
+
+Artifacts are fetched over HTTPS from the publisher, and the scripts never pipe a
+download to a shell: `install-bridge.sh` is written to a file and then executed.
+The TLS leg is narrowed where it can be:
+
+| Platform | What pins the TLS leg |
+|---|---|
+| Linux, already enrolled | the realm CA at `/etc/ipa/ca.crt`, which `ipa-client-install` put there |
+| Windows (WSL) | the realm CA is installed by the script into WSL's trust store and pinned by SHA-256 via `-CaSha256`, delivered out of band |
+
+WSL is never enrolled in the realm, so it starts with no realm CA at all. That is
+why the Windows path needs the hash and the Linux path does not, and it is why
+`-CaSha256` is the only value you still have to deliver out of band.
+
+`-CaSha256` is the only value here that is not simply trusted from the host serving
+the files. `JsoncEdit.ps1` is fetched on plain TLS, the same trust
+`install-bridge.sh` gets before running as root.
+
+What this does not defend against, stated plainly: a compromised publisher can
+serve anything. It serves `install-bridge.sh`, which runs as root. Nothing on the
+client side would notice. The clients confirm they reached the host they were told
+to reach and nothing about what that host chose to send. Beyond that, we hope the
+publishing host is not compromised. By default that host is the MCP host itself, so
+the exposure is shared rather than reduced.
+
+A signature whose key lives on the serving host would defend against nothing the
+transport already covers, since a compromised publisher holds the key, and it
+would cost a verifier on every client plus a key to distribute. Real protection
+needs the key somewhere that host cannot reach: sign offline, or ship the client
+as a signed RPM in an internal dnf repo via the base image (strongest). See
+[SECURITY.md](../SECURITY.md) [SC1].
+
+## Linux
+
+### `setup.sh` - enrol and install
+
+For a new machine. It enrols in FreeIPA and then installs the MCP client, in one
+command. Arguments it does not recognise are passed through to
+`ipa-client-install` unchanged, with the company-standard `--mkhomedir` and
+`--no-ntp` added if omitted.
+
+```sh
+# on the IPA server
+ipa host-add newbox.example.internal --random        # prints an OTP
+
+# on the new machine
+curl --proto '=https' --tlsv1.2 -fsS \
+    https://mcp.example.internal/client/setup.sh -o /tmp/s.sh
+sh /tmp/s.sh \
+    --base-url https://mcp.example.internal/client \
+    --mcp-url  https://mcp.example.internal/ \
+    --hostname=newbox.example.internal \
+    --server=ipa.example.internal --domain=example.internal \
+    --realm=EXAMPLE.INTERNAL --password='<OTP>' --unattended
+```
+
+Those `https://mcp.example.internal/client/...` URLs are the default: the MCP host
+serves the kit at `/client`. If you exported the bundle and serve it from another
+host, only the download base changes, so point `--base-url` at that host and fetch
+`setup.sh` from the same place.
+
+`--proto '=https'` matters. Without it a redirect can downgrade the fetch to
+plaintext, and what comes down that wire is executed as root a moment later. `-o`
+then `sh` rather than a pipe, for the same reason: a truncated download that is
+piped straight to a shell has already run half of itself.
+
+`--skip-mcp` enrols in IPA only. That is the supported way to defer the MCP
+client to a later run. Idempotent: an already-enrolled host skips
+`ipa-client-install`, and re-running replaces a stale shim.
+
+Enrolment runs first, so by the time anything is downloaded the machine has
+`/etc/ipa/ca.crt` and the download leg is pinned to the realm CA. If the
+publisher's certificate does not chain to it, the fetch says so and falls back to
+the system trust store. That warning matters: with the pin gone that leg rests on
+public-CA TLS alone, and there is no second check behind it. A publisher whose
+certificate is issued by the realm CA is the configuration this is written for. With the MCP host serving the kit that is automatic: the MCP host's certificate comes from the
+realm CA through FreeIPA's ACME service, so an enrolled machine fetching
+`install-bridge.sh` from it validates against the pin and never reaches the fallback.
+
+### `install-bridge.sh` - install only
+
+For a machine that is already IPA-enrolled. Same transport, no enrolment.
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsS \
+    https://mcp.example.internal/client/install-bridge.sh -o /tmp/i.sh
+sh /tmp/i.sh \
+    --base-url https://mcp.example.internal/client \
+    --mcp-url  https://mcp.example.internal/ \
+    --managed
+```
+
+The bridge lands in `/opt/mcp-krb`. `--managed` registers the server fleet-wide
+in `/etc/claude-code/managed-mcp.json`; without it the script prints the
+`claude mcp add` command and changes no configuration.
+
+`setup.sh` downloads and runs this script for you.
+
+Prefer a signed RPM in an internal dnf repo over curl-at-enrolment where you can
+(SECURITY.md [SC1]): it is the one option that moves the trust root off the
+publishing host. This is the download-then-run fallback for sites that have no internal
+repo.
+
+## Windows
+
+### Admin: once per machine
+
+```powershell
+.\setup.ps1 -IpaUser jdoe
+```
+
+Idempotent, takes about a second, no admin rights needed if WSL2 already exists.
+Other realms: `-Realm`, `-Domain`, `-Kdc`. Opt out of steps with `-SkipWsl` /
+`-SkipVSCode` / `-SkipMcp`. Safe to run non-interactively (Intune, SCCM,
+PSRemoting), where the host leaves `$PROFILE` empty and the script reconstructs
+the path.
+
+Workstations are never enrolled in the realm; they only request tickets.
+
+The WSL provisioning is not SSH-only: it installs both `krb5-user` (for `kinit`
+and `ssh`) and `python3-gssapi`, which is what the MCP bridge imports.
+See [MCP bridge](#mcp-bridge) below.
+
+Prerequisite: WSL2 with a distro. If missing, once, elevated:
+`wsl --install -d Ubuntu-24.04`
+
+Files: `setup.ps1` (provisioner) and `JsoncEdit.ps1` (comment-safe
+settings.json editing, kept separate so it can be unit-tested). Download both
+from the base URL, or download `setup.ps1` alone and pass `-BaseUrl` so it can fetch the
+helper over TLS. The helper is not verified beyond TLS: a digest injected by
+the publisher into a script the publisher serves would only prove that host agreed
+with itself.
+
+### Ticket forwardability and `-Forwardable`
+
+`setup.ps1 -Forwardable` controls one line of WSL's `/etc/krb5.conf`. It is
+off by default, and off is the safer state:
+
+```powershell
+.\setup.ps1 -IpaUser jdoe                 # forwardable = false  (default)
+.\setup.ps1 -IpaUser jdoe -Forwardable    # forwardable = true
+```
+
+Off writes `forwardable = false`, paired with `GSSAPIDelegateCredentials no` for
+SSH. A non-forwardable ticket cannot be delegated even by a client that asks to,
+so a default fleet is structurally unable to hand its users' credentials to
+anything. Leave it off unless you need the next paragraph.
+
+On is required for [D1] on-behalf-of forwarding and pointless otherwise.
+Evidence-based S4U2Proxy hard-requires a forwardable caller ticket; without it
+the KDC refuses the whole flow with an opaque `KDC_ERR_BADOPTION` that looks
+identical to a missing delegation rule.
+
+The trade, stated plainly: forwardable is also what would let a modified client
+hand the MCP server a full TGT instead of a narrow evidence credential. The server
+refuses that (`delegation.is_narrow_evidence`), so the realm's target allowlist
+still applies to everything actually used. The shipped bridge never delegates in
+either direction, [CL1]. Turning this on is a deployment decision with a documented
+cost, covered in SECURITY.md [D1].
+
+One implementation note for anyone editing that line. It renders from a
+pre-computed `$fwd` variable. An inline `$( )` must not go back into that
+here-string: bash executes it as root inside WSL, the same render-time-execution
+hazard the CA block warns about. An earlier version also tested a `$Forwardable`
+that was not a parameter, so it evaluated `$null` and emitted `false`
+unconditionally, making a security-relevant value look configurable when it was
+not.
+
+The posture question behind the switch is real and unchanged, so decide it
+knowingly:
+
+- Forwarding off (what ships). Non-forwardable workstation tickets mean a
+  workstation cannot hand a TGT to anything, so the fleet is *structurally* unable
+  to delegate. Nothing depends on a server-side check being correct. This is the
+  stronger posture and it is the default for that reason.
+- Forwarding on. `forwardable = true` is required for [D1] on-behalf-of forwarding
+  and is otherwise unnecessary: nothing else in this kit needs it, and SSH
+  explicitly does not (see the sentinel block below, which sets
+  `GSSAPIDelegateCredentials no` regardless). Turning it on is the deployment
+  decision described in [D1] of [SECURITY.md](../SECURITY.md), and it should be
+  made there and then reflected here.
+
+Note that `forwardable = false` in `krb5.conf` is strictly stronger than
+`GSSAPIDelegateCredentials no` in the ssh config, and that it forecloses
+evidence-based S4U2Proxy along with everything else. That is the trade.
+
+### Employees: day to day
+
+```
+wsl kinit jdoe@EXAMPLE.INTERNAL     # ~once a week
+wslssh anything.example.internal    # no password
+```
+
+`wsl kinit -R` renews without a password (tickets are 24h, renewable 7d).
+
+Renamed from `kssh`. On a workstation provisioned before the rename, re-running
+`setup.ps1` removes the old `kssh` function and adds `wslssh`. Until it is re-run,
+that machine still has `kssh` and not `wslssh`, so tell people the new name and the
+re-run together rather than one without the other.
+
+Those two cover SSH and VS Code Remote-SSH. If this workstation was also set up
+with `-McpUrl`, the same ticket serves MCP, so there is still nothing extra to
+type day to day, but see [MCP bridge](#mcp-bridge) for what breaks when the
+ticket expires.
+
+### Realm CA
+
+SSH needs no CA (it authenticates with GSSAPI and host keys), so this was easy to
+miss: the gap only appears the first time something speaks HTTPS to an internal
+host, and it surfaces as `self-signed certificate in chain`, which reads like a
+server misconfiguration rather than a missing client trust anchor.
+
+The script therefore fetches the realm CA into WSL's trust store
+(`/usr/local/share/ca-certificates/realm-ca.crt`). That fetch is a CA distribution
+endpoint and cannot be a trusted channel: WSL has no realm anchor yet, so there is
+by construction nothing for TLS to validate the CA against. This is why the
+transport cannot be the control and `-CaSha256` is the pin, delivered out of band.
+A copy of `setup.ps1` downloaded from the publisher already carries the pin.
+Running the script straight out of the repo checkout does not, so pass it.
+
+This hash is now the only out-of-band trust root in the whole Windows path, so
+treat it as one: deliver it the way you would have delivered a signing key (MDM,
+Intune parameter, kickstart, a printed handout), and read the value once from an
+enrolled host:
+
+```
+sha256sum /etc/ipa/ca.crt
+.\setup.ps1 -IpaUser jdoe -CaSha256 <hash>
+```
+
+Three outcomes, all deliberate:
+
+| Result | Meaning | Effect |
+|---|---|---|
+| `CA-PIN-MISMATCH` | fetched CA is not the one you pinned | fatal, installs nothing |
+| `CA-UNPINNED` | no pin in this copy and none passed | warns, installs nothing, run continues |
+| `CA-SKIP` | CA endpoint unreachable | warns, run continues |
+
+`CA-UNPINNED` installs nothing: fetching a CA over an unauthenticated channel and
+trusting it because it arrived first is not a control. The run still succeeds,
+because SSH authenticates with GSSAPI and host keys and must keep working on a
+workstation that cannot reach the CA. The MCP step is the exception: it speaks
+HTTPS, so with `-McpUrl` a missing CA is fatal and the script exits non-zero
+rather than failing later with an opaque certificate error. Steps 1 to 5 have
+already run at that point, so SSH is provisioned either way.
+
+### MCP bridge
+
+Opt-in and off by default. An SSH-only workstation is unaffected; nothing in this
+section runs unless you pass `-McpUrl`.
+
+```powershell
+.\setup.ps1 -IpaUser jdoe `
+    -BaseUrl https://mcp.example.internal/client `
+    -McpUrl  https://mcp.example.internal `
+    -CaSha256 <hash>
+```
+
+`-BaseUrl` is mandatory with `-McpUrl` and the run throws without it. `-BaseUrl`
+is the publisher directory the bytes come from,
+`https://mcp.example.internal/client` by default; `-McpUrl` is the API the bridge
+will talk to, and nothing is ever downloaded from it. By default the same host
+also serves the kit at `/client`, a different URL on the same machine from the API
+endpoint.
+
+The realm CA must already be in WSL's trust store by this point, because the
+bridge install speaks HTTPS to the publisher. With `-McpUrl` a missing CA is
+fatal, so pass `-CaSha256` unless you are running a copy of `setup.ps1`
+downloaded from the publisher.
+See [Realm CA](#realm-ca) above.
+
+That does two things:
+
+1. Inside WSL, installs the bridge to `/opt/mcp-krb/mcp-krb-bridge.py` by
+   downloading `install-bridge.sh` from the publisher over HTTPS and running it. The
+   TLS leg is validated against the realm CA installed in step 2, so the CA pin
+   is what stands behind this, and nothing else does: a compromised publisher
+   serves whatever it likes to a root shell inside WSL (SECURITY.md [SC1]).
+   It is never installed from the repo checkout: `/mnt/c` reports every file as
+   `0777`, and it would be a second trust path with no pin on it at all.
+2. On Windows, registers the server with Claude Code via
+   `claude mcp add-json --scope user internal-tools ...`. An existing
+   `internal-tools` entry is left alone. If the `claude` CLI is not on PATH, the
+   exact command is printed instead. `%USERPROFILE%\.claude.json` is never
+   edited directly: it holds unrelated session state.
+
+#### Why the registration goes through `wsl.exe`
+
+Claude Code runs on Windows. The Kerberos ticket lives in WSL. So the
+bridge cannot be launched as `/usr/bin/python3`, which is the form both Linux
+examples in `bridge/examples/` use and which Windows simply cannot execute. It is
+launched through `wsl.exe` instead. The generic shape is committed as
+[`bridge/examples/mcp.json.windows.example`](bridge/examples/mcp.json.windows.example):
+
+```json
+{
+  "mcpServers": {
+    "internal-tools": {
+      "type": "stdio",
+      "command": "wsl.exe",
+      "args": ["-e", "/usr/bin/python3", "/opt/mcp-krb/mcp-krb-bridge.py", "https://mcp.example.internal/"]
+    }
+  }
+}
+```
+
+Add `-d <distro>` on any machine with Docker Desktop. A bare `wsl.exe -e`
+targets the default distro, and Docker Desktop registers `docker-desktop`,
+which frequently ends up as the default and has none of this provisioning. The
+symptom is the bridge failing instantly with no ticket and no `python3-gssapi`.
+The committed example stays generic because JSON takes no comments, but the
+registration the script generates always names the distro it provisioned:
+
+```json
+"args": ["-d", "Ubuntu-24.04", "-e", "/usr/bin/python3", "/opt/mcp-krb/mcp-krb-bridge.py", "https://mcp.example.internal/"]
+```
+
+Check yours with `wsl --list --verbose`; the `*` marks the default.
+
+#### Verify
+
+```powershell
+claude mcp list              # internal-tools should appear
+```
+
+For a real round trip, ask Claude Code to list the tools from `internal-tools`,
+or run one tool call. A successful `tools/list` proves ticket, TLS trust and
+server-side authorization all work.
+
+#### When it stops working
+
+An expired ticket breaks MCP calls exactly as it breaks Remote-SSH, and just as
+silently: the tool call fails, not the login. Same fix.
+
+```powershell
+wsl kinit -R                 # or a full: wsl kinit jdoe@EXAMPLE.INTERNAL
+```
+
+`-McpUrl` must be `https://`; the script rejects anything else, because the
+bridge sends a Kerberos `Negotiate` token on every request.
+
+### Why `wslssh` and not `ssh`
+
+Deliberate. An earlier version aliased `ssh` itself, and that was a mistake:
+ssh inside WSL reads *WSL's* `~/.ssh`, so hijacking the name silently breaks
+
+- every private key (they live in the Windows `~/.ssh`; WSL's is empty, and
+  `-i /mnt/c/...` fails too because drvfs reports files as `0777` and OpenSSH
+  refuses world-readable private keys),
+- every named `Host` alias in the Windows config: those stop *resolving*, not
+  just authenticating, so the error is a DNS failure with no hint of the cause,
+- `known_hosts`, and the Windows ssh-agent (unreachable from WSL).
+
+It is also both too broad and too narrow: PowerShell aliases are not inherited by
+child processes, so it captures interactive PowerShell while missing cmd.exe,
+scripts and CI. The same command name then means two different programs
+depending on where you type it. And `scp`/`sftp`/`rsync` are not aliased, so file
+transfer to the very hosts this kit serves would silently fall back to the
+Kerberos-incapable Windows binary.
+
+`wslssh` is a PowerShell function rather than a `.bat`, because batch `%*` is
+re-parsed by cmd.exe, so an argument containing `& | < > ^` becomes local command
+execution. `@args` splats safely with no cmd layer. The `.bat` exists only
+because VS Code's `remote.SSH.path` needs a file on disk, and is not for
+interactive use.
+
+### Why WSL and not Windows' own ssh
+
+`C:\Windows\System32\OpenSSH\ssh.exe` accepts `GSSAPIAuthentication yes` and will
+even attempt `gssapi-with-mic`, but its GSSAPI is a shim over the Windows LSA
+store (`GSSAPI_SSPI 1`, `KRB5` compiled out). It cannot read the cache `kinit`
+writes, so it fails with `GSS_S_FAILURE`. No configuration changes this; the
+upstream request for a user-supplied GSSAPI library was closed unimplemented.
+
+Git Bash's ssh *is* GSSAPI-capable (Heimdal) but ships no `kinit` and could not
+consume an MIT-written cache (`Miscellaneous failure`). Cygwin works but ships an
+orphaned krb5 from 2018. WSL2 wins because `kinit` and `ssh` there are the same
+MIT krb5 stack reading one cache, and it is patchable via `apt`.
+
+### Ticket cache location
+
+`/home/<user>/.krb5/ccache`, set via `default_ccache_name` in `krb5.conf` so
+`kinit` and ssh agree without environment variables. Deliberately not:
+
+- `/tmp`: systemd-tmpfiles wipes it on boot, and WSL2 shuts its VM down after
+  ~60s idle, so tickets would vanish several times a day.
+- `/var/tmp`: persistent, but `1777` with a predictable filename, so another uid
+  can squat it. (Confidentiality is not the issue: MIT creates the cache `0600`
+  and uses `unlink()` + `O_CREAT|O_EXCL`. Denial of service is.)
+
+### ssh config
+
+One wildcard, in a sentinel-delimited managed block in WSL's `~/.ssh/config`:
+
+```
+# BEGIN setup-workstation
+Host *.example.internal
+    User jdoe
+    GSSAPIAuthentication yes
+    GSSAPIDelegateCredentials no
+# END setup-workstation
+```
+
+No per-host entries, ever. Re-running with a different `-IpaUser` rewrites the
+block. `GSSAPIDelegateCredentials no` plus `forwardable = false` in `krb5.conf`
+enforce the no-delegation posture ([CL1] in ../SECURITY.md); note that the second is
+strictly stronger, and forecloses evidence-based S4U2Proxy. See
+[Ticket forwardability and `-Forwardable`](#ticket-forwardability-and--forwardable)
+for what that costs you if you want [D1].
+
+### VS Code Remote-SSH
+
+The script sets these for you (backing up `settings.json`, preserving comments):
+
+```json
+"remote.SSH.path": "C:\\Users\\<you>\\bin\\ssh-dispatch.bat",
+"remote.SSH.useLocalServer": false,
+"remote.SSH.enableDynamicForwarding": false
+```
+
+`remote.SSH.enableDynamicForwarding` is off on purpose. Its default routes VS
+Code's link to the remote server through a SOCKS proxy that the WSL ssh opens
+inside WSL's own network namespace. On a cold connect, Windows can try to reach
+that port before WSL has mirrored it to the Windows loopback, which surfaces as
+`connect ECONNREFUSED 127.0.0.1:<port>` after the remote server has already
+started, and often as a follow-on "extension failed to launch" error that is
+really just the dead connection rather than anything wrong with the extension or
+its binary. A plain TCP forward sidesteps that timing. The port still lives in
+WSL, so if the failure ever recurs the durable fix is WSL mirrored networking:
+put `networkingMode=mirrored` under `[wsl2]` in `%USERPROFILE%\.wslconfig`, run
+`wsl --shutdown`, and reconnect, which shares one namespace between WSL and
+Windows so the mirror step disappears. That is a machine-wide network change and
+can affect some VPNs, so it is left to the operator rather than written by the
+installer.
+
+`remote.SSH.path` is global (VS Code uses it for every Remote-SSH host), so
+`ssh-dispatch.bat` routes by destination rather than forcing a choice:
+
+| Destination | Goes to | Why |
+|---|---|---|
+| `*.example.internal` | WSL ssh | Kerberos/GSSAPI |
+| anything else | `System32\OpenSSH\ssh.exe` | your existing keys, `Host` aliases, `known_hosts` |
+
+So one VS Code profile serves both worlds. You do not need *Profiles: Create
+Profile*, and existing Remote-SSH hosts keep working untouched.
+
+Then *Remote-SSH: Connect to Host* and type the FQDN. VS Code builds its dropdown
+from the Windows ssh config while realm connections run ssh inside WSL.
+A wildcard yields no dropdown entries, so type the hostname.
+
+#### Dispatcher limits (measured, not theoretical)
+
+`ssh-dispatch.bat` is for VS Code only. Humans use `ssh` (other hosts) or
+`wslssh` (realm hosts); both are cmd-free and immune to everything below.
+
+Verified working: real GSSAPI connections, exit-code propagation (returns 42
+for `exit 42`, which Remote-SSH depends on), and quoted multi-word arguments
+preserved byte-for-byte.
+
+Verified failure modes, all outside how VS Code invokes it:
+
+| Failure | Example | Why |
+|---|---|---|
+| cmd metacharacters run locally | `wslssh h "echo A&echo B"` via the .bat → `echo B` executes on Windows | cmd re-parses the line before the script runs. Inherent to any `.bat`; only a compiled `.exe` shim would fix it |
+| substring false positive | `ssh-dispatch.bat legacy-host "cat /etc/hosts.example.internal"` → routed to WSL | routing greps the whole argument string for the domain |
+| named alias for a realm host | `Host myvm` → `HostName host1.example.internal` | the literal argument has no domain, so it goes to Windows ssh and fails. Use FQDNs for realm hosts |
+
+Sharing one host list between the two is not possible: `Include
+/mnt/c/.../.ssh/config` from WSL fails with `Bad owner or permissions`, because
+drvfs reports files as `0777` and OpenSSH enforces strict permissions on included
+files (it does not for `-F`).
+
+Tickets expire and VS Code reconnects silently, so an expired ticket looks like
+the extension breaking. Run `wsl kinit -R`.
+
+## macOS (manual)
+
+There is no macOS script. Linux gets a real FreeIPA enrolment and Windows gets
+`setup.ps1`; a Mac gets neither. macOS is a hand-written faux-enrolment: it
+configures the Kerberos client only, does not join the machine to the realm, and is
+not idempotent. It was worked out and proven on a live Mac. The full copy-paste
+procedure is the macOS section of the provisioning page the MCP host serves at
+`/client/`; the steps below are the shape and the one trap.
+
+The trap, because it costs an afternoon otherwise: the `krb5.conf` KDC line must be
+
+```
+kdc = tcp/ipa.example.internal
+```
+
+with the `tcp/` prefix. macOS ships Heimdal rather than MIT krb5, and Heimdal has no
+`udp_preference_limit`. Over UDP the KDC issues the ticket and the oversized reply
+is dropped by any VPN with a small MTU, so the client reports *"unable to reach any
+KDC in realm"* about a KDC that already answered. The error points nowhere near the
+cause.
+
+The rest is standard: `/etc/resolver/<domain>` for split DNS to the realm resolver,
+a `krb5.conf` with `[realms]`/`[domain_realm]`, `~/.ssh/config` with
+`GSSAPIAuthentication yes` and `GSSAPIDelegateCredentials no` ([CL1]), then `kinit`.
+Use `klist -v` to see flags, not `klist -f` (the MIT spelling). The realm CA is
+needed only for HTTPS to the MCP host, not for `kinit` or `ssh`, and is verified out
+of band by SHA-256. The MCP bridge has no macOS path yet; SSH via GSSAPI does work.
+
+## The bridge itself
+
+Everything above installs one file, `bridge/mcp-krb-bridge.py`. This section is
+what that file is.
+
+Claude Code talks to a tiny local process over stdio; the bridge forwards each
+JSON-RPC message to the Kerberized MCP server with a fresh
+`Authorization: Negotiate` token minted per request from the developer's FreeIPA
+login ticket. No passwords, no API keys, no per-dev secrets.
+
+```
+Claude Code ──stdio──▶ mcp-krb-bridge.py ──HTTPS + Negotiate──▶ nginx ──▶ Python MCP server
+                        fresh token per request                          (../server/)
+```
+
+A fresh token per request keeps the server's Kerberos replay cache on: no RFC
+4120 violation, and no token that can age into a 401. Cost: one lightweight local
+Python process per session. Analysis in [../SECURITY.md](../SECURITY.md);
+concepts in [the root README](../README.md).
+
+### Transport, precisely
+
+The usual case is HTTPS, but the exact rule the code enforces is narrower than
+"HTTPS only" and it is worth knowing which:
+
+- a scheme that is not `http` or `https` is refused outright;
+- `http://` is refused to any non-local host. It is permitted only to
+  `localhost`, `127.0.0.1` and `::1`, which is what makes a loopback test rig
+  possible without weakening the fleet rule;
+- `MCP_KRB_NOAUTH=1` drops the `Authorization` header entirely. Local testing
+  only. It is not a fallback and not a degraded mode; it produces a bridge that
+  authenticates nobody.
+
+Note the split of responsibility: `setup.ps1` rejects any `-McpUrl` that is not
+`https://` at provisioning time, which is stricter than what the bridge itself
+enforces at runtime. That is intentional. A provisioned workstation has no reason
+to talk to loopback.
+
+### Sessions
+
+The bridge tracks `Mcp-Session-Id` and, if the server 404s a session, transparently
+re-initializes and retries. Against this server that machinery never engages:
+`server/mcp_server.py` runs with `stateless_http=True`, so no session id is ever
+issued or honoured server-side. The bridge forwards a session id opaquely if
+it ever sees one and never treats it as a credential. Authorization is the
+per-request Negotiate token and only that. The bridge keeps the code path because
+it is a general Streamable-HTTP client, not because this deployment needs it.
+
+Two more behaviours: SSE-encoded POST responses are parsed and each event is
+forwarded, so progress notifications during long tool calls work; and the
+standalone GET stream for unsolicited server-to-client push is not opened,
+because plain tool servers do not need it.
+
+### No credential delegation, from the client side
+
+The bridge builds its GSSAPI context explicitly without `delegate_to_peer`,
+so it never forwards the user's TGT to the server. That equals python-gssapi's
+safe default and is stated explicitly for auditability. A test asserts the flag is
+absent.
+
+This stopped being belt-and-braces the day [D1] shipped. Enabling
+on-behalf-of forwarding requires workstation tickets to be forwardable, and a
+forwardable ticket is exactly what a client needs in order to hand over a TGT
+instead of the narrow S4U2Proxy evidence credential. The KDC's own target
+allowlist does not constrain a forwarded TGT. The server refuses that credential
+outright (`delegation.is_narrow_evidence`), so the allowlist does apply to
+everything actually used, and a client that tried it would simply be denied.
+Proven on a live KDC. So the flag list here is the reason *our* clients stay on
+the safe side of that line, and adding `delegate_to_peer` would quietly convert
+every user of this bridge into the hostile-client case. See [CL1] and
+[D1] in [SECURITY.md](../SECURITY.md).
+
+### Registering it with Claude Code
+
+Three ways, in descending order of blast radius:
+
+1. Fleet-wide, `/etc/claude-code/managed-mcp.json`. What `install-bridge.sh --managed`
+   writes. Shape committed as
+   [`bridge/examples/managed-mcp.json.example`](bridge/examples/managed-mcp.json.example).
+2. Per user, via `claude mcp add-json --scope user internal-tools ...`. What
+   `setup.ps1` runs on Windows. Without `--managed`, `install-bridge.sh` prints the
+   equivalent command and changes no configuration.
+3. Per repo, by committing
+   [`bridge/examples/mcp.json.example`](bridge/examples/mcp.json.example) as
+   `.mcp.json`.
+
+The two Linux examples launch `/usr/bin/python3` directly. The Windows one
+launches through `wsl.exe`; see
+[Why the registration goes through `wsl.exe`](#why-the-registration-goes-through-wslexe)
+for why, and for the `-d <distro>` warning that matters on any machine with
+Docker Desktop.
+
+### Notes
+
+- TLS trust: the bridge uses the system store (the IPA CA is already trusted
+  on an enrolled host, and `setup.ps1` puts it in WSL's store). `--ca <pem>` for
+  edge cases.
+- `python3-gssapi` is not automatic everywhere. On an IPA-enrolled Linux
+  workstation it arrives with `ipa-client`, so there is nothing to install.
+  Inside WSL this is false: the WSL distro is *not* IPA-enrolled and has no
+  `ipa-client`, so `python3-gssapi` (and `krb5-user` for `kinit`) must be
+  installed explicitly with `apt`. `setup.ps1` does this for you. If you are
+  setting WSL up by hand, do it first or the bridge dies on `import gssapi`.
+- Windows devs run the bridge inside WSL2. On a non-domain-joined Windows
+  box, SSPI has no MIT ccache and falls back to NTLM, which the server rejects.
+  `pip install pyspnego` does not change that.
+- Verified: the hermetic unit suite (`sh ../tests/run-tests.sh`, which prints
+  the count, which is why none is written here) plus a live end-to-end run on real
+  FreeIPA (bridge and server, including replay rejection).
+
+## Rollback
+
+Nothing changes on the servers or in FreeIPA.
+
+Linux:
+
+```sh
+sudo rm -rf /opt/mcp-krb
+sudo rm -f /etc/claude-code/managed-mcp.json   # only if --managed was used
+kdestroy
+```
+
+Windows:
+
+```powershell
+Remove-Item "$env:USERPROFILE\bin\ssh-dispatch.bat"
+# delete the wslssh line from $PROFILE.CurrentUserAllHosts
+# delete the sentinel block from WSL's ~/.ssh/config
+wsl kdestroy
+```
+
+If `-McpUrl` was used, also:
+
+```powershell
+claude mcp remove internal-tools
+wsl -u root -e rm -rf /opt/mcp-krb
+```
+
+`/opt/mcp-krb` holds only the bridge, and it holds no credential.
+
+Un-enrolling a Linux machine from the realm is a separate operation and this kit
+does not do it: `sudo ipa-client-install --uninstall`.
