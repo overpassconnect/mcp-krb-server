@@ -182,6 +182,61 @@ def trigger_build(job: str, ctx: Context) -> str:
             '(%d bytes, not shown) (stub)' % (job, p, len(h)))
 # ----------------------------------------------------------------------------
 
+
+# --------------------------- site extension ---------------------------------
+# Your own tools do not belong in this repository. They name real internal
+# hosts, they are not part of a reference implementation, and carrying them here
+# would mean every deployment maintaining a fork of a file it did not write.
+#
+# Set MCP_SITE_TOOLS to a Python file and it is loaded at startup, after the
+# stubs above and before the app is built, so its tools are registered in time.
+# The file defines one function:
+#
+#     def register(mcp, require, forward_header, register_tool_policy):
+#         @mcp.tool()
+#         def my_tool(ctx: Context) -> str:
+#             p = require(ctx, 'my_tool')
+#             ...
+#         register_tool_policy('my_tool', {'some-ipa-group'})
+#
+# Keep that file OUTSIDE the deployed code directory. run.sh converges that
+# directory on this repo's file set, so anything left beside these modules is
+# removed on the next deploy, and the tools would disappear with it.
+# /etc/mcp-server/ is the natural home: the installer owns it and never prunes
+# it. Own it root:root 0644 like the code, and version it wherever you keep
+# site configuration.
+#
+# Two things it does not get: the invariant test in tests/python/ parses this
+# file only, so a site tool's require() wiring is not checked here, and the
+# optional policy editor will not list tools it cannot see in the reviewed
+# defaults until register_tool_policy has run.
+#
+# Loading is fail-loud. A path that is set but unreadable, unloadable, or
+# missing register() stops the server at startup rather than serving a tool set
+# that silently lost half its entries.
+def _load_site_tools():
+    path = os.environ.get('MCP_SITE_TOOLS', '').strip()
+    if not path:
+        return
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('mcp_site_tools', path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError('MCP_SITE_TOOLS is not a loadable Python file: %s' % path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    register = getattr(module, 'register', None)
+    if not callable(register):
+        raise RuntimeError(
+            '%s must define register(mcp, require, forward_header, '
+            'register_tool_policy)' % path)
+    register(mcp, require, forward_header, authz.register_tool_policy)
+    _audit({'event': 'site_tools.loaded', 'path': path})
+
+
+_load_site_tools()
+
+
 # Wrap the SDK's Starlette app with the sealed Kerberos auth middleware.
 # The optional authz policy editor is disabled by default: build_editor() returns
 # None unless MCP_AUTHZ_EDITOR is set with a valid MCP_POLICY_ADMINS allowlist. When

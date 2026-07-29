@@ -18,7 +18,10 @@ in to a FreeIPA-enrolled machine. No passwords, no API keys, no per-dev secrets.
 It is a reference implementation. The MCP tools it ships (`whoami`,
 `list_projects`, `restart_service`, `trigger_build`) are stubs; the value is the
 authentication, authorization, delegation and deployment scaffolding around them,
-meant to be read, reviewed and adapted to your own tools.
+meant to be read, reviewed and adapted to your own tools. Your own tools go in a
+separate file that this repository never carries, loaded through `MCP_SITE_TOOLS`
+(see [Configuration](#configuration)), so a deployment does not end up
+maintaining a fork of a file it did not write.
 
 A tool can also act on behalf of the caller. One of those stubs, `trigger_build`,
 shows the delegation path: a tool calls a downstream Kerberized service as the human
@@ -290,6 +293,36 @@ delegate ([CL1]), and the full analysis is [D1] in [SECURITY.md](SECURITY.md).
 realm, KDC, MCP URL, CA hash, delegation toggles). Copy it to
 `/etc/mcp-server/site.env`, fill it in, and keep it out of git; the installer reads
 site values from there and nowhere else.
+
+### Your own tools
+
+`MCP_SITE_TOOLS` points at a Python file loaded at startup, after the shipped
+stubs and before the ASGI app is built. It defines one function:
+
+```python
+def register(mcp, require, forward_header, register_tool_policy):
+    @mcp.tool()
+    def list_tickets(ctx: Context) -> str:
+        """List the caller's tickets."""
+        p = require(ctx, 'list_tickets')          # authorize first, always
+        h = forward_header(ctx, 'list_tickets')   # optional: act as the caller
+        ...
+    register_tool_policy('list_tickets', {'support-staff'})
+```
+
+Keep that file outside the deployed code directory. `run.sh` converges that
+directory on this repository's file set, so anything left beside the shipped
+modules is removed on the next deploy, and your tools would go with it.
+`/etc/mcp-server/site_tools.py` is the natural home: the installer owns that
+directory and never prunes it. Own it `root:root 0644`, the same as the code, and
+keep it in whatever repository holds your site configuration.
+
+Loading is fail-loud. A path that is set but unreadable, unloadable, or missing
+`register()` stops the server at startup rather than quietly serving a tool set
+that lost half its entries. Two limits worth knowing: the invariant test in
+`tests/python/` parses `mcp_server.py` only, so it does not check a site tool's
+`require()` wiring, and delegation targets for site tools still come from
+`MCP_DELEGATION_TARGETS` like any other.
 
 ## Repository layout
 

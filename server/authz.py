@@ -111,6 +111,42 @@ _MAX_POLICY_BYTES = 256 * 1024
 _policy_lock = threading.Lock()   # serialises validate + persist + rebind
 
 
+def register_tool_policy(tool, groups):
+    """Add a policy entry for a tool defined outside this file.
+
+    A site extension (MCP_SITE_TOOLS, see mcp_server.py) adds tools that are not
+    in the literal map above, and require() denies anything without an entry, so
+    each one needs registering here.
+
+    It writes the reviewed default as well as the live map. _apply() rebuilds the
+    live map from _DEFAULT_TOOL_GROUPS every time a policy overlay is loaded, so
+    an entry added only to the live map would vanish the first time the optional
+    editor saved or reloaded, and the tool would start denying for no visible
+    reason.
+
+    What this does not do is widen anything by itself: a site tool still gets an
+    explicit group set, chosen by whoever wrote the site file, and everything
+    else in this module (deny by default, the realm gate, the SSSD lookup)
+    applies unchanged. The CODEOWNERS gate on this file covers the mechanism; a
+    deployment's own tool list is that deployment's to review."""
+    if not isinstance(tool, str) or not _TOOL_RE.match(tool):
+        raise ValueError('invalid tool name: %r' % (tool,))
+    if groups is not ANY_AUTHENTICATED:
+        if not groups or not all(isinstance(g, str) and _GROUP_RE.match(g) for g in groups):
+            raise ValueError(
+                'groups for %r must be ANY_AUTHENTICATED or a non-empty set of '
+                'valid group names' % (tool,))
+        if len(groups) > _MAX_GROUPS_PER_TOOL:
+            raise ValueError('too many groups for %r' % (tool,))
+        groups = frozenset(groups)
+    with _policy_lock:
+        if len(_DEFAULT_TOOL_GROUPS) >= _MAX_TOOLS and tool not in _DEFAULT_TOOL_GROUPS:
+            raise ValueError('too many tools')
+        _DEFAULT_TOOL_GROUPS[tool] = groups
+        TOOL_GROUPS[tool] = groups
+
+
+
 def policy_to_json(mapping=None):
     """Canonical JSON-able view of a tool->groups mapping (defaults to the live
     policy): {tool: "*"} for ANY_AUTHENTICATED, else {tool: sorted([groups])}."""
