@@ -663,18 +663,69 @@ echo OK
     }
 }
 
+# Write the registration straight into %USERPROFILE%\.claude.json, which is the
+# file `claude mcp add-json --scope user` maintains.
+#
+# This exists because the `claude` CLI is not always present. A workstation with
+# only the Claude Code desktop app has no standalone `claude` on PATH, and that
+# is now the common case, so the CLI branch below would leave the bridge
+# installed and correctly configured but unreachable, with the user told to run
+# a command they have no binary for.
+#
+# Conservative on every failure: malformed JSON is left alone, an existing entry
+# of the same name is never overwritten (it may have been tuned by hand), the
+# rewritten document is parsed again before it replaces anything, and the old
+# file is copied aside first. The file also holds unrelated session state, so it
+# is round-tripped whole rather than edited textually.
+function Register-McpInUserConfig {
+    param([Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][hashtable]$Entry)
+
+    $cfg = Join-Path $env:USERPROFILE '.claude.json'
+    try {
+        if (Test-Path $cfg) {
+            $raw = [IO.File]::ReadAllText($cfg)
+            if ([string]::IsNullOrWhiteSpace($raw)) { $doc = [pscustomobject]@{} }
+            else { $doc = $raw | ConvertFrom-Json }
+        } else {
+            $doc = [pscustomobject]@{}
+        }
+    } catch {
+        Warn "MCP: $cfg is not valid JSON - left untouched."
+        return $false
+    }
+
+    if ($doc.PSObject.Properties.Name -notcontains 'mcpServers') {
+        $doc | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([pscustomobject]@{})
+    }
+    if ($doc.mcpServers.PSObject.Properties.Name -contains $Name) {
+        Say "MCP: $Name is already in .claude.json - left untouched"
+        return $true
+    }
+    $doc.mcpServers | Add-Member -NotePropertyName $Name -NotePropertyValue ([pscustomobject]$Entry)
+
+    # Depth 100: this file nests deeply (per-project session state). The 5.1
+    # default of 2 would silently truncate it to the string "System.Object[]".
+    $out = $doc | ConvertTo-Json -Depth 100
+    try { $null = $out | ConvertFrom-Json } catch {
+        Warn 'MCP: the rewritten .claude.json would not parse - nothing written.'
+        return $false
+    }
+    if (Test-Path $cfg) { Copy-Item $cfg "$cfg.bak" -Force -ErrorAction SilentlyContinue }
+    # No BOM: Out-File -Encoding utf8 emits one on 5.1 and JSON readers choke.
+    [IO.File]::WriteAllText($cfg, $out, (New-Object Text.UTF8Encoding($false)))
+    return $true
+}
+
 if ($mcpDone) {
     # Strict JSON, built by ConvertTo-Json so quoting and escaping cannot drift.
-    $mcpEntry = @{
-        mcpServers = @{
-            'internal-tools' = @{
-                type    = 'stdio'
-                command = 'wsl.exe'
-                args    = @('-d', $distro, '-e', '/usr/bin/python3',
-                            '/opt/mcp-krb/mcp-krb-bridge.py', "$McpBase/")
-            }
-        }
+    $mcpServerEntry = @{
+        type    = 'stdio'
+        command = 'wsl.exe'
+        args    = @('-d', $distro, '-e', '/usr/bin/python3',
+                    '/opt/mcp-krb/mcp-krb-bridge.py', "$McpBase/")
     }
+    $mcpEntry = @{ mcpServers = @{ 'internal-tools' = $mcpServerEntry } }
     $mcpJson = $mcpEntry | ConvertTo-Json -Depth 6 -Compress
     $claudeCli = Get-Command claude -ErrorAction SilentlyContinue
     $registered = $false
@@ -704,7 +755,15 @@ if ($mcpDone) {
             }
         } finally { $ErrorActionPreference = $prevEap }
     } else {
-        Warn 'MCP: the `claude` CLI is not on PATH - register manually:'
+        Say 'MCP: no `claude` CLI on PATH (desktop app only) - writing .claude.json directly'
+    }
+    if (-not $registered) {
+        # Same destination the CLI would have written, reached without it.
+        if (Register-McpInUserConfig -Name 'internal-tools' -Entry $mcpServerEntry) {
+            Say 'MCP: registered internal-tools for your user in .claude.json'
+            Say 'MCP: restart the Claude Code app, or open a new session, to pick it up'
+            $registered = $true
+        }
     }
     if (-not $registered) {
         Write-Host "    claude mcp add-json --scope user internal-tools '$mcpJson'" -ForegroundColor Cyan

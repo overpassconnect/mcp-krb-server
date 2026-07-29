@@ -365,11 +365,22 @@ That does two things:
    serves whatever it likes to a root shell inside WSL (SECURITY.md [SC1]).
    It is never installed from the repo checkout: `/mnt/c` reports every file as
    `0777`, and it would be a second trust path with no pin on it at all.
-2. On Windows, registers the server with Claude Code via
-   `claude mcp add-json --scope user internal-tools ...`. An existing
-   `internal-tools` entry is left alone. If the `claude` CLI is not on PATH, the
-   exact command is printed instead. `%USERPROFILE%\.claude.json` is never
-   edited directly: it holds unrelated session state.
+2. On Windows, registers the server with Claude Code at user scope, so the tools
+   are available from every folder rather than one project. It prefers
+   `claude mcp add-json --scope user internal-tools ...` when the `claude` CLI is
+   on PATH. A workstation with only the Claude Code desktop app has no such CLI,
+   which is now the common case, so the installer falls back to writing the same
+   entry into `%USERPROFILE%\.claude.json` itself. Without that fallback the
+   bridge would be installed and correctly configured but unreachable, and the
+   operator told to run a command they have no binary for.
+
+   That file also holds unrelated session state, so the fallback is deliberately
+   conservative: it round-trips the whole document rather than editing it as
+   text, refuses to touch a file that does not parse, never overwrites an
+   existing `internal-tools` entry (it may have been tuned by hand), re-parses
+   the result before it replaces anything, and copies the original to
+   `.claude.json.bak` first. Restart the app, or open a new session, to pick it
+   up.
 
 #### Why the registration goes through `wsl.exe`
 
