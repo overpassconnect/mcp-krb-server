@@ -30,8 +30,21 @@
 
   /* The download base is the directory this page was served from, so the
    * commands stay correct wherever the bundle is hosted. '/client/' and
-   * '/client/index.html' both yield '<origin>/client'. */
+   * '/client/index.html' both yield '<origin>/client'.
+   *
+   * downloadBase overrides that, for a host that serves the page and the files
+   * from different paths: a landing page at / with the artifacts under /d/, say,
+   * where the files often carry Content-Disposition: attachment and so cannot
+   * share a directory with a page meant to render. Without the override such a
+   * host has to hand-edit the page, which forks it from the repo permanently.
+   * Relative values are resolved against the origin; absolute URLs pass through
+   * so the bundle can be served from one host and the files from another. */
   var BASE = location.origin + location.pathname.replace(/\/[^\/]*$/, '');
+  if (SITE.downloadBase) {
+    BASE = /^https?:\/\//.test(SITE.downloadBase)
+      ? SITE.downloadBase.replace(/\/+$/, '')
+      : location.origin + '/' + String(SITE.downloadBase).replace(/^\/+|\/+$/g, '');
+  }
 
   /* Missing config values become a visible <MARKER> rather than a raw __TOKEN__,
    * so a half-filled config.js reads as "set this" instead of looking like a
