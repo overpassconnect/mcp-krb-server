@@ -735,36 +735,43 @@ Docker Desktop.
 
 ## Rollback
 
-What the realm keeps depends on the platform. Windows and macOS never enrol, so
-they change nothing on the servers or in FreeIPA. Linux does: `setup.sh` runs
-`ipa-client-install`, which creates a host entry and a host keytab on the IPA
-server, and the steps below remove neither.
+Two scripts, both driven by the install manifest the installers write, and both
+defaulting to a dry run: they print the plan and change nothing until asked.
+The scripts are the reference for what is removed and restored; every removal
+is justified by a manifest entry saying the installer created it, and every
+replaced file or settings key goes back to the recorded prior state rather than
+being deleted.
 
-Linux:
+Linux, and inside WSL:
 
 ```sh
-sudo rm -rf /opt/mcp-krb
-sudo rm -f /etc/claude-code/managed-mcp.json   # only if --managed was used
-kdestroy
+sudo sh uninstall.sh            # print the plan
+sudo sh uninstall.sh --yes      # apply it
 ```
 
-Un-enrolling the machine from the realm is a separate operation and this kit
-does not do it: `sudo ipa-client-install --uninstall`.
+`--keep-packages` leaves apt/dnf packages alone even where the kit installed
+them; `--managed` also removes the machine-wide `/etc/claude-code`
+registration, which affects every user on the machine and is therefore opt-in.
 
-Windows:
+Windows, which also cleans the WSL side through the distro the installer
+recorded in the manifest, never the default distro:
 
 ```powershell
-Remove-Item "$env:USERPROFILE\bin\ssh-dispatch.bat"
-# delete the wslssh line from $PROFILE.CurrentUserAllHosts
-# delete the sentinel block from WSL's ~/.ssh/config
-wsl kdestroy
+.\uninstall.ps1                 # print the plan
+.\uninstall.ps1 -Yes            # apply it
 ```
 
-If `-McpUrl` was used, also:
+What the scripts deliberately do not do, one line each:
 
-```powershell
-claude mcp remove internal-tools
-wsl -u root -e rm -rf /opt/mcp-krb
-```
+- Un-enrol from FreeIPA. A Linux workstation's host entry and host keytab stay
+  on the IPA server; `sudo ipa-client-install --uninstall` is the separate,
+  deliberate act that changes that. Windows and macOS never enrol, so the realm
+  holds nothing of theirs.
+- Unregister the WSL distro. That deletes an entire Linux filesystem;
+  `wsl --unregister <distro>` is printed, never run.
+- Delete `.bak` files. `settings.json.bak` and `.claude.json.bak` may predate
+  this kit, so they are reported by path and left alone.
 
-`/opt/mcp-krb` holds only the bridge, and it holds no credential.
+A workstation provisioned before the manifest existed has nothing recorded, so
+both scripts refuse to guess: they print what a manifest would have told them
+and exit non-zero, leaving the reversal to you.
