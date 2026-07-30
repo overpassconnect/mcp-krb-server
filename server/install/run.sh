@@ -1569,9 +1569,23 @@ frag = open(os.environ["SECTIONS_FILE"], encoding="utf-8").read()
 with open(page, encoding="utf-8") as f:
     html = f.read()
 
-for marker in ("<!-- site-sections -->", "<!-- site-nav -->"):
-    if marker not in html:
-        sys.stderr.write("the page has no %s marker\n" % marker)
+def marker(name):
+    """A marker counts only when it is alone on its line.
+
+    Substring matching looked fine until the page's own header comment
+    explained where the markers are, in prose, quoting their literal text.
+    That comment sits above the real markers, so the first replacement
+    landed inside it: the injected section ended up commented out and
+    invisible, the real markers went untouched, and the nav gained no
+    entry. Anchoring to a whole line tells prose about a marker apart from
+    the marker itself.
+    """
+    return re.compile(r"^[ \t]*" + re.escape(name) + r"[ \t]*$", re.M)
+
+
+for name in ("<!-- site-sections -->", "<!-- site-nav -->"):
+    if not marker(name).search(html):
+        sys.stderr.write("the page has no %s marker on a line of its own\n" % name)
         sys.exit(1)
 
 # One nav entry per top-level section, labelled by its <h2> with any tag
@@ -1584,8 +1598,10 @@ if not nav:
     sys.stderr.write("no <section id=...><h2> found in the fragment; nothing to link\n")
     sys.exit(1)
 
-html = html.replace("<!-- site-nav -->", "\n".join(nav).lstrip(), 1)
-html = html.replace("<!-- site-sections -->", frag.rstrip() + "\n", 1)
+# Lambda replacements, so a backslash in the fragment is never read as a
+# group reference.
+html = marker("<!-- site-nav -->").sub(lambda _: "\n".join(nav), html, count=1)
+html = marker("<!-- site-sections -->").sub(lambda _: frag.rstrip(), html, count=1)
 
 with open(page, "w", encoding="utf-8", newline="") as f:
     f.write(html)

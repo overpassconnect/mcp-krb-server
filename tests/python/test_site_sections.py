@@ -109,6 +109,37 @@ class TestInjection(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("marker", proc.stderr)
 
+    def test_prose_quoting_a_marker_is_not_mistaken_for_one(self):
+        # This shipped broken. The page's header comment documents the markers
+        # by quoting them, and that comment is above the real ones, so a
+        # first-occurrence replace put the whole injected section inside the
+        # comment: invisible on the page, no nav entry, and no error anywhere.
+        page = MINIMAL.replace(
+            "<html><body>",
+            "<html>\n<!--\n  run.sh injects at the <!-- site-sections --> and\n"
+            "  <!-- site-nav --> markers below.\n-->\n<body>")
+        proc, out = run_injector(page, ONE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # the section must land in the body, after the documentation comment
+        self.assertLess(out.index("markers below"), out.index('<section id="containers">'))
+        # and the nav entry must be in the real nav, not the prose
+        nav = out[out.index('<nav class="os">'):out.index("</nav>")]
+        self.assertIn('href="#containers"', nav)
+
+    def test_indented_marker_still_matches(self):
+        # The real page indents them; only whitespace may surround one.
+        page = MINIMAL.replace("  <!-- site-sections -->", "        <!-- site-sections -->")
+        proc, out = run_injector(page, ONE)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('<section id="containers">', out)
+
+    def test_marker_with_trailing_text_on_the_line_does_not_match(self):
+        page = MINIMAL.replace("  <!-- site-sections -->",
+                               "  <!-- site-sections --> <p>trailing</p>")
+        proc, _ = run_injector(page, ONE)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("line of its own", proc.stderr)
+
     def test_shipped_page_carries_both_markers(self):
         # If someone removes a marker while editing the page, every deployment's
         # sections vanish at the next install. Catch that here, not in the field.
