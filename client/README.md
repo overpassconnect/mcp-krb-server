@@ -711,7 +711,10 @@ Docker Desktop.
 
 ## Rollback
 
-Nothing changes on the servers or in FreeIPA.
+What the realm keeps depends on the platform. Windows and macOS never enrol, so
+they change nothing on the servers or in FreeIPA. Linux does: `setup.sh` runs
+`ipa-client-install`, which creates a host entry and a host keytab on the IPA
+server, and the steps below remove neither.
 
 Linux:
 
@@ -720,6 +723,9 @@ sudo rm -rf /opt/mcp-krb
 sudo rm -f /etc/claude-code/managed-mcp.json   # only if --managed was used
 kdestroy
 ```
+
+Un-enrolling the machine from the realm is a separate operation and this kit
+does not do it: `sudo ipa-client-install --uninstall`.
 
 Windows:
 
@@ -738,6 +744,3 @@ wsl -u root -e rm -rf /opt/mcp-krb
 ```
 
 `/opt/mcp-krb` holds only the bridge, and it holds no credential.
-
-Un-enrolling a Linux machine from the realm is a separate operation and this kit
-does not do it: `sudo ipa-client-install --uninstall`.
