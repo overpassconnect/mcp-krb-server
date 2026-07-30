@@ -603,8 +603,10 @@ a `krb5.conf` with `[realms]`/`[domain_realm]`, `~/.ssh/config` with
 `GSSAPIAuthentication yes` and `GSSAPIDelegateCredentials no` ([CL1]), then `kinit`.
 Use `klist -v` to see flags, not `klist -f` (the MIT spelling). SSH via GSSAPI works.
 
-The realm CA is needed only for HTTPS to the MCP host, not for `kinit` or `ssh`,
-which GSSAPI and host keys cover between them. The fetch is plain HTTP, so the hash
+The realm CA is required, and `setup-macos.sh` refuses to run without
+`--ca-sha256`. `kinit` and `ssh` do not need it, since GSSAPI and host keys cover
+those, but the bridge speaks HTTPS to the MCP host and without the CA that fails
+with a certificate error that reads like a bug in the bridge. The fetch is plain HTTP, so the hash
 comparison is the entire check, and the expected value has to reach you from
 somewhere other than the infrastructure serving the file:
 

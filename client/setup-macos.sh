@@ -30,7 +30,7 @@
 #   sh setup-macos.sh --domain example.internal --realm EXAMPLE.INTERNAL \
 #       --kdc ipa.example.internal --dns-ip 10.0.0.53 --ipa-user jdoe \
 #       [--mcp-url https://mcp.example.internal/] [--base-url URL] \
-#       [--ca-sha256 HEX] [--skip-ca] [--skip-mcp] [--managed] [--dry-run]
+#       --ca-sha256 HEX [--skip-mcp] [--managed] [--dry-run]
 #
 #   --managed  register machine-wide in /Library/Application Support/ClaudeCode/
 #              managed-mcp.json instead of the user's ~/.claude.json. Mirrors
@@ -41,7 +41,7 @@ set -eu
 
 DOMAIN=''; REALM=''; KDC=''; DNS_IP=''; IPA_USER=''
 MCP_URL=''; BASE_URL=''; CA_SHA=''
-SKIP_CA=0; SKIP_MCP=0; DRY_RUN=0; MANAGED=0
+SKIP_MCP=0; DRY_RUN=0; MANAGED=0
 CERT_SHA1=''
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -62,7 +62,6 @@ while [ $# -gt 0 ]; do
         --mcp-url)    MCP_URL="$2"; shift 2 ;;
         --base-url)   BASE_URL="$2"; shift 2 ;;
         --ca-sha256)  CA_SHA="$2"; shift 2 ;;
-        --skip-ca)    SKIP_CA=1; shift ;;
         --skip-mcp)   SKIP_MCP=1; shift ;;
         --managed)    MANAGED=1; shift ;;
         --dry-run)    DRY_RUN=1; shift ;;
@@ -83,6 +82,14 @@ fi
 [ -n "$KDC" ]      || die "--kdc is required"
 [ -n "$DNS_IP" ]   || die "--dns-ip is required"
 [ -n "$IPA_USER" ] || die "--ipa-user is required"
+# Required, not optional. The bridge speaks HTTPS to the MCP host, and
+# without the realm CA that fails with an opaque certificate error that
+# looks like a bug in the bridge. Get the hash from whoever runs the realm,
+# out of band: the certificate is fetched over plain HTTP, so comparing it
+# against a hash from the same infrastructure would be checking it against
+# itself.
+[ -n "$CA_SHA" ]   || die "--ca-sha256 is required. Ask whoever runs the realm
+  for the SHA-256 of its CA, and do not take it from the provisioning page."
 
 command -v python3 >/dev/null || die "python3 not found; run: xcode-select --install"
 if [ "$DRY_RUN" != 1 ]; then
@@ -204,14 +211,15 @@ else
     say "sentinel block for *.$DOMAIN in $SSHCFG"
 fi
 
-# ------------------------------------------------------- 4. realm CA (optional)
-# Needed only for HTTPS to the MCP host. kinit and ssh do not use it: GSSAPI and
-# host keys carry that. The fetch is plain HTTP, so the hash comparison IS the
-# check, and the hash must come from somewhere other than this infrastructure.
+# ------------------------------------------------------- 4. realm CA
+# kinit and ssh do not need this; GSSAPI and host keys carry those. The bridge
+# does, because it speaks HTTPS to the MCP host, and without the CA that fails
+# with a certificate error reading like a bug in the bridge.
+#
+# The fetch is plain HTTP, so the hash comparison IS the check. That is why the
+# expected value has to reach the operator from somewhere other than the
+# infrastructure serving the certificate.
 echo "==> 4. realm CA"
-if [ "$SKIP_CA" = 1 ] || [ -z "$CA_SHA" ]; then
-    say "skipped (no --ca-sha256 given). Needed only for HTTPS to the MCP host."
-else
     ca=$(mktemp)
     curl -fsS -o "$ca" "http://$KDC/ipa/config/ca.crt" || die "could not fetch the CA"
     got=$(shasum -a 256 "$ca" | awk '{print $1}')
@@ -232,7 +240,6 @@ else
         say "recorded for removal (SHA-1): $CERT_SHA1"
     fi
     rm -f "$ca"
-fi
 
 # ------------------------------------------------------- 5. the MCP bridge
 # python-gssapi ships macOS wheels for x86_64 and arm64, so no compiler is

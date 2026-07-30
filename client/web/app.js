@@ -211,8 +211,31 @@
       })(tabLinks[w], panes[w]);
     }
 
+    /* Which tab opens first. A #hash wins, because a deep link someone was
+     * sent is a stronger signal than a guess. Otherwise open the tab for the
+     * visitor's own OS: almost everyone arriving here is provisioning the
+     * machine they are reading this on, and landing them on Linux when they
+     * are on a Mac just makes them hunt.
+     *
+     * userAgentData is the modern source and undefined in Safari and Firefox,
+     * so userAgent is the fallback rather than the other way round. Order
+     * matters: iOS and Android both report platforms that match the desktop
+     * patterns, and neither has a section here, so they fall through to the
+     * default rather than being shown a page they cannot follow. */
+    function detectedTab() {
+      var uaData = navigator.userAgentData;
+      var s = (uaData && uaData.platform) || navigator.platform ||
+              navigator.userAgent || '';
+      if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '')) { return null; }
+      if (/Mac|Darwin/i.test(s)) { return 'macos'; }
+      if (/Win/i.test(s)) { return 'windows'; }
+      if (/Linux|X11|CrOS/i.test(s)) { return 'linux'; }
+      return null;
+    }
+
     if (!location.hash || !selectTab(location.hash.slice(1))) {
-      selectTab(panes[0].id);
+      var guess = detectedTab();
+      if (!guess || !selectTab(guess)) { selectTab(panes[0].id); }
     }
   }
 })();
