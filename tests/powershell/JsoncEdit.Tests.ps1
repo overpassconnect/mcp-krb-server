@@ -126,3 +126,72 @@ Describe 'Set-JsoncKey' {
         ($r | Select-String -Pattern ',' -AllMatches).Matches.Count | Should -Be 0
     }
 }
+
+Describe 'Remove-JsoncKey' {
+    It 'an absent key is a no-op, so uninstall can run twice' {
+        $text = "{`n    ""a"": 1`n}"
+        Remove-JsoncKey -Text $text -Key 'k' | Should -Be $text
+    }
+
+    It 'removes a key with its trailing comma' {
+        $text = "{`n    ""k"": ""gone"",`n    ""a"": 1`n}"
+        $r = Remove-JsoncKey -Text $text -Key 'k'
+        $r.Contains('gone') | Should -BeFalse
+        $r.Contains('"a": 1') | Should -BeTrue
+        Test-JsoncValid $r | Should -BeTrue
+    }
+
+    It 'removes the leading comma when the key is last in its object' {
+        $text = "{`n    ""a"": 1,`n    ""k"": ""gone""`n}"
+        $r = Remove-JsoncKey -Text $text -Key 'k'
+        $r.Contains('gone') | Should -BeFalse
+        $r.Contains('"a": 1') | Should -BeTrue
+        Test-JsoncValid $r | Should -BeTrue
+    }
+
+    It 'removes the only key and leaves a valid empty object' {
+        $r = Remove-JsoncKey -Text "{`n    ""k"": 1`n}" -Key 'k'
+        Test-JsoncValid $r | Should -BeTrue
+        $r.Contains('"k"') | Should -BeFalse
+    }
+
+    It 'a same-named key nested in another object is not matched' {
+        $text = "{`n    ""wrap"": { ""k"": 1 },`n    ""a"": 2`n}"
+        Remove-JsoncKey -Text $text -Key 'k' | Should -Be $text
+    }
+
+    It 'removes the top-level key and leaves a nested same-named one alone' {
+        $text = "{`n    ""k"": ""top"",`n    ""wrap"": { ""k"": ""nested"" }`n}"
+        $r = Remove-JsoncKey -Text $text -Key 'k'
+        $r.Contains('"top"') | Should -BeFalse
+        $r.Contains('"k": "nested"') | Should -BeTrue
+        Test-JsoncValid $r | Should -BeTrue
+    }
+
+    It 'a key that exists only in a comment is not removed' {
+        $text = "{`n    // ""k"": 1`n    ""a"": 2`n}"
+        Remove-JsoncKey -Text $text -Key 'k' | Should -Be $text
+    }
+
+    It 'preserves comments and formatting around the removal' {
+        $text = "{`n    // keep me`n    ""k"": true,`n    ""a"": 2   // and me`n}"
+        $r = Remove-JsoncKey -Text $text -Key 'k'
+        $r.Contains('// keep me') | Should -BeTrue
+        $r.Contains('// and me') | Should -BeTrue
+        Test-JsoncValid $r | Should -BeTrue
+    }
+
+    It 'refuses a key whose value is an object rather than corrupt the file' {
+        Remove-JsoncKey -Text '{ "k": { "nested": 1 } }' -Key 'k' | Should -Be $null
+    }
+
+    It 'refuses a key whose value is an array rather than corrupt the file' {
+        Remove-JsoncKey -Text '{ "k": [1, 2] }' -Key 'k' | Should -Be $null
+    }
+
+    It 'set then remove round-trips to the original document' {
+        $text = "{`n    ""a"": 1`n}"
+        $set = Set-JsoncKey -Text $text -Key 'k' -JsonValue '"v"'
+        Remove-JsoncKey -Text $set -Key 'k' | Should -Be $text
+    }
+}
