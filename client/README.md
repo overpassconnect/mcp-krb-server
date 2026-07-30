@@ -595,9 +595,32 @@ cause.
 The rest is standard: `/etc/resolver/<domain>` for split DNS to the realm resolver,
 a `krb5.conf` with `[realms]`/`[domain_realm]`, `~/.ssh/config` with
 `GSSAPIAuthentication yes` and `GSSAPIDelegateCredentials no` ([CL1]), then `kinit`.
-Use `klist -v` to see flags, not `klist -f` (the MIT spelling). The realm CA is
-needed only for HTTPS to the MCP host, not for `kinit` or `ssh`, and is verified out
-of band by SHA-256. SSH via GSSAPI works.
+Use `klist -v` to see flags, not `klist -f` (the MIT spelling). SSH via GSSAPI works.
+
+The realm CA is needed only for HTTPS to the MCP host, not for `kinit` or `ssh`,
+which GSSAPI and host keys cover between them. The fetch is plain HTTP, so the hash
+comparison is the entire check, and the expected value has to reach you from
+somewhere other than the infrastructure serving the file:
+
+```sh
+curl -fsS -o /tmp/realm-ca.crt http://ipa.example.internal/ipa/config/ca.crt
+shasum -a 256 /tmp/realm-ca.crt        # must equal the value you were given
+sudo security add-trusted-cert -d -r trustRoot \
+     -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
+```
+
+VS Code needs no configuration on macOS. The three `remote.SSH.*` keys `setup.ps1`
+writes on Windows exist only to push `ssh` across the WSL boundary; a Mac's
+`/usr/bin/ssh` already speaks GSSAPI and already reads the `~/.ssh/config` above. If
+`ssh host` works in Terminal, Remote-SSH works.
+
+One thing not to tidy up: the macOS `krb5.conf` deliberately leaves
+`default_ccache_name` unset, unlike the WSL one this kit writes, which pins a
+`FILE:` cache. macOS defaults to a session-wide cache, `KCM:` up to Ventura and
+`API:` from Sonoma, and that is what lets an application launched from the Dock,
+inheriting no shell environment, still find the ticket. Pinning a `FILE:` path to
+match the WSL config would break GUI launches in a way that looks unrelated to the
+change that caused it.
 
 The MCP bridge runs on macOS too. The packaging problem that once blocked it no
 longer exists: python-gssapi has shipped macOS wheels for x86_64 and arm64 since
@@ -760,6 +783,33 @@ recorded in the manifest, never the default distro:
 .\uninstall.ps1                 # print the plan
 .\uninstall.ps1 -Yes            # apply it
 ```
+
+macOS has no uninstall script, matching its install. The steps, in reverse order
+of the manual procedure:
+
+```sh
+# 1. the bridge and its registration
+claude mcp remove internal-tools          # or drop the entry from ~/.claude.json
+rm -rf "$HOME/Library/Application Support/mcp-krb"
+
+# 2. the trusted CA, if it was ever added. The hash algorithm CHANGES here:
+#    add-trusted-cert is verified against the SHA-256 above, delete-certificate
+#    matches on the SHA-1, and passing the wrong one silently matches nothing
+#    and leaves the certificate trusted.
+openssl x509 -noout -fingerprint -sha1 -in realm-ca.crt
+sudo security delete-certificate -t -Z <SHA1> /Library/Keychains/System.keychain
+
+# 3. Kerberos, DNS and SSH
+sudo rm -f /etc/krb5.conf                 # or restore the copy you kept
+sudo rm -f /etc/resolver/example.internal
+kdestroy
+```
+
+Then delete the `Host *.example.internal` block from `~/.ssh/config` by hand.
+Searching that delete command turns up alarming results about SIP blocking
+keychain changes: those concern `SystemRootCertificates.keychain`, the
+Apple-shipped roots. A CA an administrator added to `System.keychain` is not one
+of those and removes normally.
 
 What the scripts deliberately do not do, one line each:
 
