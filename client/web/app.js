@@ -146,4 +146,60 @@
       }
     })(groups[g]);
   }
+
+  /* 5. sidebar tabs: one platform section at a time. body.tabs is set here and
+   *    only here, so with scripts off none of the tab CSS engages and the page
+   *    stays the single scrolling document. Deep links keep working: a #hash
+   *    on load selects that tab, and switching uses replaceState so the back
+   *    button does not fill up with tab flips. */
+  var tabLinks = document.querySelectorAll('nav.os a[href^="#"]');
+  var panes = [];
+  var wired = tabLinks.length > 0;
+  for (var n = 0; n < tabLinks.length; n++) {
+    var pane = document.getElementById(tabLinks[n].getAttribute('href').slice(1));
+    if (!pane) { wired = false; break; }
+    panes.push(pane);
+  }
+  if (wired) {
+    document.body.classList.add('tabs');
+
+    function selectTab(id) {
+      var found = false;
+      for (var i = 0; i < panes.length; i++) {
+        if (panes[i].id === id) {
+          panes[i].classList.add('current');
+          tabLinks[i].classList.add('on');
+          found = true;
+        } else {
+          panes[i].classList.remove('current');
+          tabLinks[i].classList.remove('on');
+        }
+      }
+      return found;
+    }
+
+    for (var w = 0; w < tabLinks.length; w++) {
+      (function (link, pane) {
+        link.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          selectTab(pane.id);
+          if (window.history && history.replaceState) {
+            history.replaceState(null, '', '#' + pane.id);
+          } else {
+            location.hash = pane.id;
+          }
+          /* Under 860px the layout is the stacked original with every section
+           * visible, so a tab tap should still travel to the section the way
+           * the plain anchor would have. */
+          if (window.matchMedia && matchMedia('(max-width: 860px)').matches) {
+            pane.scrollIntoView();
+          }
+        });
+      })(tabLinks[w], panes[w]);
+    }
+
+    if (!location.hash || !selectTab(location.hash.slice(1))) {
+      selectTab(panes[0].id);
+    }
+  }
 })();

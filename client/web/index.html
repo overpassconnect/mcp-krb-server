@@ -32,7 +32,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  .bar { max-width: 860px; margin: 0 auto; padding: 1.5rem 1.25rem .2rem;
+  .bar { max-width: 1240px; margin: 0 auto; padding: 1.5rem 1.25rem .2rem;
          display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .bar img { height: 30px; display: block; }
   .bar .welcome { margin: 0; color: var(--muted); font-size: 14px; }
@@ -41,7 +41,7 @@
     .bar .on-light { display: none; }
     .bar .on-dark { display: block; }
   }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
   h1 { font-size: 1.55rem; margin: .2rem 0 .3rem; letter-spacing: -.01em; }
   .lede { color: var(--muted); margin: 0 0 1.6rem; }
 
@@ -51,6 +51,29 @@
              text-decoration: none; color: var(--fg); background: var(--card); font-size: 14px; }
   nav.os a.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent);
                 font-weight: 600; }
+
+  /* Sidebar layout. Everything below is gated on body.tabs, which only app.js
+     sets: with scripts off nothing is hidden and the page stays the single
+     scrolling document above. Styles live here because the CSP is
+     default-src 'none' with style-src 'unsafe-inline'; there is no external
+     stylesheet to put them in. */
+  body.tabs .layout { display: grid; grid-template-columns: 230px minmax(0, 1fr);
+                      gap: 1.5rem; align-items: start; }
+  body.tabs .side { position: sticky; top: 1.2rem; }
+  body.tabs nav.os { flex-direction: column; flex-wrap: nowrap; margin-bottom: 0; }
+  body.tabs nav.os a { justify-content: flex-start; }
+  body.tabs .pane > section { display: none; }
+  body.tabs .pane > section.current { display: block; }
+  body.tabs .sep, body.tabs .rule { display: none; }
+  @media (max-width: 860px) {
+    /* The stacked original: one column, every section visible, row nav. */
+    body.tabs .layout { display: block; }
+    body.tabs .side { position: static; }
+    body.tabs nav.os { flex-direction: row; flex-wrap: wrap; margin-bottom: 1.8rem; }
+    body.tabs .pane > section { display: block; }
+    body.tabs .sep { display: flex; }
+    body.tabs .rule { display: block; }
+  }
 
   section { background: var(--card); border: 1px solid var(--line); border-radius: 5px;
             padding: 1.3rem 1.4rem; margin-bottom: 1.1rem; }
@@ -105,11 +128,16 @@
   <p class="lede">Set your workstation up for Kerberos single sign-on against
   <code>__REALM__</code>.</p>
 
+  <div class="layout">
+  <aside class="side">
   <nav class="os">
     <a class="on" href="#linux">Linux</a>
     <a href="#windows">Windows</a>
     <a href="#macos">macOS (manual)</a>
+    <a href="#artifacts">Artifacts</a>
   </nav>
+  </aside>
+  <main class="pane">
 
   <section id="linux">
     <h2>Linux<span class="tag">default</span></h2>
@@ -382,7 +410,7 @@ claude mcp add --scope user internal-tools -- \
 
   <div class="rule"></div>
 
-  <section>
+  <section id="artifacts">
     <h2>Artifacts</h2>
     <p class="note">Five files, flat, and that is the whole set. Nothing here is signed. There
     is no checksum manifest and no signature to check: transport is TLS and TLS alone, so
@@ -399,6 +427,9 @@ claude mcp add --scope user internal-tools -- \
   </section>
 
   <p class="help">Need help? <a class="help-mail" href="#">contact your IT team</a></p>
+
+  </main>
+  </div>
 </div>
 
 <script src="config.js"></script>
