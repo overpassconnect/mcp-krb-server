@@ -222,12 +222,28 @@ fi
 echo "==> 4. realm CA"
     ca=$(mktemp)
     curl -fsS -o "$ca" "http://$KDC/ipa/config/ca.crt" || die "could not fetch the CA"
-    got=$(shasum -a 256 "$ca" | awk '{print $1}')
-    if [ "$got" != "$CA_SHA" ]; then
+
+    # Two hashes name the same certificate and people arrive with either.
+    # `sha256sum /etc/ipa/ca.crt` hashes the PEM file; a browser's certificate
+    # dialog, and `openssl x509 -fingerprint -sha256`, hash the DER encoding.
+    # They are different strings for the same trust decision, so rejecting the
+    # DER one would send someone hunting an attack that is not there.
+    # Normalise the operator's value: colons out, lowercased.
+    want=$(printf '%s' "$CA_SHA" | tr -d ':' | tr 'A-F' 'a-f')
+    got_pem=$(shasum -a 256 "$ca" | awk '{print $1}')
+    got_der=$(openssl x509 -in "$ca" -outform der 2>/dev/null | shasum -a 256 | awk '{print $1}')
+
+    if [ "$want" = "$got_pem" ]; then
+        say "hash verified (PEM file): $got_pem"
+    elif [ -n "$got_der" ] && [ "$want" = "$got_der" ]; then
+        say "hash verified (DER fingerprint): $got_der"
+    else
         rm -f "$ca"
-        die "CA hash mismatch. expected $CA_SHA, got $got. Stop and talk to IT."
+        die "CA hash mismatch. Stop and talk to whoever runs the realm.
+  you gave:        $want
+  PEM file:        $got_pem
+  DER fingerprint: $got_der"
     fi
-    say "hash verified: $got"
     run $SUDO security add-trusted-cert -d -r trustRoot \
         -k /Library/Keychains/System.keychain "$ca"
     # Record the SHA-1, not the SHA-256 just verified. They are different hashes
