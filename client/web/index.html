@@ -8,10 +8,12 @@
   page infers it from where it is served (location), so the same bundle works
   from whatever host you copy it to. See config.example.js for the shape.
 
-  A deployment adds its own sections through CLIENT_SITE_SECTIONS, which
-  run.sh injects at the <!-- site-sections --> and <!-- site-nav --> markers
-  below. That is the supported way: hand-editing a served copy forks it from
-  this file and nothing can regenerate it.
+  A deployment adds its own sections through CLIENT_SITE_SECTIONS, which run.sh
+  injects at the "site-sections" and "site-nav" comment markers below. Named
+  without their comment syntax on purpose: writing the delimiters out would end
+  THIS comment at the first of them and dump the rest of it onto the page as
+  text, which is exactly what happened once. Hand-editing a served copy instead
+  forks it from this file, and nothing can regenerate it.
 
   Nothing site-specific belongs in THIS file. It may be public. Realm-shaped
   strings you see below (__REALM__, __DOMAIN__, __KDC__, __MCP_URL__,

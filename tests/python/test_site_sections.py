@@ -149,6 +149,50 @@ class TestInjection(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("line of its own", proc.stderr)
 
+    def test_no_comment_in_the_page_nests_a_comment_delimiter(self):
+        # An HTML comment ends at its first '-->'. The header comment used to
+        # document the markers by writing them out in full, so it ended at the
+        # first one and the remainder of the comment rendered as body text at
+        # the top of the live page.
+        page = PAGE.read_text(encoding="utf-8")
+        for body in re.findall(r"<!--(.*?)-->", page, re.S):
+            self.assertNotIn(
+                "<!--", body,
+                "an HTML comment contains a nested comment opener, so it ends "
+                "early and the rest of it renders as text")
+
+    def test_no_text_escapes_to_the_top_level(self):
+        # The symptom the above causes, asserted directly. A comment that ends
+        # early spills its remainder out at document level, above <html>, which
+        # is where the browser then paints it. <title> and <style> hold real
+        # character data of their own, so only depth zero counts.
+        import html.parser
+
+        VOID = {"img", "input", "br", "hr", "meta", "link", "source", "col"}
+
+        class Leak(html.parser.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.depth = 0
+                self.leaked = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag not in VOID:
+                    self.depth += 1
+
+            def handle_endtag(self, tag):
+                if tag not in VOID and self.depth:
+                    self.depth -= 1
+
+            def handle_data(self, data):
+                if self.depth == 0 and data.strip():
+                    self.leaked.append(data.strip()[:60])
+
+        p = Leak()
+        p.feed(PAGE.read_text(encoding="utf-8"))
+        self.assertEqual(p.leaked, [],
+                         "text escapes to document level: %s" % p.leaked)
+
     def test_shipped_page_carries_both_markers(self):
         # If someone removes a marker while editing the page, every deployment's
         # sections vanish at the next install. Catch that here, not in the field.
