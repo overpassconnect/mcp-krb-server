@@ -338,15 +338,43 @@ fi
 # was the user's own and should be put back.
 if [ "$DRY_RUN" != 1 ]; then
     mkdir -p "$APPDIR"
-    CREATED="$CREATED" CREATED_DIRS="$CREATED_DIRS" REPLACED="$REPLACED" \n    APPDIR="$APPDIR" CERT_SHA1="$CERT_SHA1" MANIFEST="$MANIFEST" python3 - <<'PYEOF'
+    CREATED="$CREATED" CREATED_DIRS="$CREATED_DIRS" REPLACED="$REPLACED" \
+    APPDIR="$APPDIR" CERT_SHA1="$CERT_SHA1" MANIFEST="$MANIFEST" python3 - <<'PYEOF'
 import json, os
 appdir = os.environ["APPDIR"]
+
+# Merge with any manifest already here rather than replacing it. A second run
+# finds most things already in their desired state and so records almost
+# nothing, and overwriting would leave uninstall knowing less than it did after
+# the first run: the resolver file, the ssh config, the certificate would all
+# quietly stop being removable.
+old = {}
+try:
+    with open(os.environ["MANIFEST"]) as f:
+        prev = json.load(f)
+    if prev.get("manifest_version") == 1:
+        old = prev
+except (OSError, ValueError):
+    pass
+
+
+def union(key, extra):
+    seen = list(old.get(key, []))
+    for v in extra:
+        if v not in seen:
+            seen.append(v)
+    return seen
+
+
+replaced = dict(old.get("replaced", {}))
+replaced.update({p: os.path.join(appdir, "krb5.conf.orig")
+                 for p in os.environ["REPLACED"].split()})
+
 m = {"manifest_version": 1,
      "written_by": "setup-macos.sh",
-     "created": os.environ["CREATED"].split(),
-     "created_dirs": os.environ["CREATED_DIRS"].split(),
-     "replaced": {p: os.path.join(appdir, "krb5.conf.orig")
-                  for p in os.environ["REPLACED"].split()},
+     "created": union("created", os.environ["CREATED"].split()),
+     "created_dirs": union("created_dirs", os.environ["CREATED_DIRS"].split()),
+     "replaced": replaced,
      "packages_installed": [],
      "packages_already_present": [],
      "prior_values": {}}

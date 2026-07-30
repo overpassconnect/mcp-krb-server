@@ -305,17 +305,43 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     points nowhere near the cause. This one prefix is the difference between a working Mac and
     a lost afternoon.</p>
 
+    <p class="note"><strong>The realm CA comes first, and that ordering is not cosmetic.</strong>
+    Every host here presents a certificate signed by the realm's own CA, which a fresh Mac has
+    never heard of, so HTTPS to this site fails until the CA is trusted. The certificate itself
+    is fetched over plain <em>HTTP</em>, needing no trust, and the hash is what makes that safe:
+    the first command below refuses to install anything whose SHA-256 does not match the value
+    you were given. Do not reach for <code>curl -k</code> to get past this. That would fetch a
+    script you are about to run with <code>sudo</code> over a connection nothing has verified,
+    which is the one thing SECURITY.md&nbsp;[SC1] promises never happens.</p>
+
+    <p class="note"><strong>Nothing below is commented, deliberately.</strong> macOS uses zsh,
+    and zsh does not treat <code>#</code> as a comment in an interactive shell unless
+    <code>interactive_comments</code> is set, which it is not by default. Pasting a commented
+    block gives you <code>command not found: #</code>. The commentary lives out here instead,
+    so everything in a box can be pasted as-is.</p>
+
     <div class="fill" data-fill="mac-script">
       <label>Your IPA username
         <input type="text" autocomplete="off" spellcheck="false"
                data-token="&lt;your-ipa-username&gt;"
                placeholder="jdoe">
       </label>
+      <label>Realm CA SHA-256, from IT and not from this page
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;ca-sha256&gt;"
+               placeholder="paste the value you were given">
+      </label>
     </div>
-<pre><code id="mac-script">cd "$(mktemp -d)"
+<pre><code id="mac-script">CA_SHA=&lt;ca-sha256&gt;
+
+curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
+echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
+  &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
+       -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
+
+cd "$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup-macos.sh -o setup-macos.sh
 
-# Add --dry-run to print the plan and change nothing.
 sh setup-macos.sh \
     --domain __DOMAIN__ \
     --realm __REALM__ \
@@ -324,27 +350,33 @@ sh setup-macos.sh \
     --ipa-user &lt;your-ipa-username&gt; \
     --base-url __BASE__ \
     --mcp-url __MCP_URL__ \
-    --ca-sha256 __CA_SHA256__
+    --ca-sha256 "$CA_SHA"
 
 kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
 
-    <p class="note">That is the whole thing: split DNS, Kerberos, SSH, the realm CA and the
-    MCP bridge. Then <code>ssh anything.__DOMAIN__</code> with no password, and re-run
-    <code>kinit</code> when the ticket expires, about once a day. Use <code>klist -v</code> to
-    see the flags; <code>klist -f</code> is the MIT spelling and not what this Kerberos
-    understands. Add <code>--managed</code> to register the bridge for every user on the
-    machine rather than just you. VS Code needs no configuration on macOS: the
+    <p class="note">The <code>&amp;&amp;</code> on the third line is load-bearing: a hash that
+    does not match leaves the certificate untrusted, and the <code>curl</code> below it then
+    fails rather than quietly proceeding. If you see a TLS error there, the CA step did not
+    succeed; do not work around it.</p>
+
+    <p class="note">Past that, the script does the lot: split DNS, Kerberos, SSH, the CA again
+    (harmlessly, it is idempotent) and the MCP bridge. Add <code>--dry-run</code> to print the
+    plan and change nothing; add <code>--managed</code> to register the bridge for every user on
+    the machine rather than just you. Afterwards <code>ssh anything.__DOMAIN__</code> needs no
+    password, and <code>kinit</code> again when the ticket expires, about once a day. Use
+    <code>klist -v</code> for the flags: <code>klist -f</code> is the MIT spelling and not what
+    this Kerberos understands. VS Code needs no configuration here, because the
     <code>remote.SSH.*</code> settings on the Windows tab exist only to push <code>ssh</code>
     across the WSL boundary, and a Mac's own <code>ssh</code> already speaks GSSAPI.</p>
 
-    <p class="note"><strong>Check the hash against the value IT gave you, not the one in the
-    command above.</strong> The certificate is fetched over plain HTTP, so that comparison is
-    the entire check, and a hash printed by the same infrastructure that serves the
-    certificate is checking itself. If the two disagree, stop.</p>
-
     <h3>By hand</h3>
-    <p class="note">The same thing without running a downloaded script. One paste, and it is
-    what <code>setup-macos.sh</code> does.</p>
+    <p class="note">The same thing without running a downloaded script, in six stanzas:
+    <strong>1</strong> the realm CA, first for the reason above, <strong>2</strong> split DNS to
+    the realm resolver, <strong>3</strong> the Kerberos client, <strong>4</strong> SSH over
+    GSSAPI with delegation off (SECURITY.md&nbsp;[CL1]), <strong>5</strong> the bridge as a
+    per-user venv needing no sudo, and <strong>6</strong> registering it, then a ticket.
+    <code>default_ccache_name</code> is deliberately unset: macOS keeps the ticket in a
+    session-wide cache, which is what lets an app launched from the Dock find it.</p>
 
     <div class="fill" data-fill="mac-manual">
       <label>Your IPA username
@@ -352,14 +384,22 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
                data-token="&lt;your-ipa-username&gt;"
                placeholder="jdoe">
       </label>
+      <label>Realm CA SHA-256, from IT
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;ca-sha256&gt;"
+               placeholder="paste the value you were given">
+      </label>
     </div>
-<pre><code id="mac-manual"># 1. Split DNS: send realm lookups to the realm's resolver.
+<pre><code id="mac-manual">CA_SHA=&lt;ca-sha256&gt;
+
+curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
+echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
+  &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
+       -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
+
 sudo mkdir -p /etc/resolver
 printf 'nameserver __DNS_IP__\n' | sudo tee /etc/resolver/__DOMAIN__ &gt;/dev/null
 
-# 2. Kerberos. The tcp/ prefix is the trap described above. default_ccache_name
-#    is deliberately unset: macOS keeps the ticket in a session-wide cache, which
-#    is what lets an app launched from the Dock find it.
 sudo tee /etc/krb5.conf &gt;/dev/null &lt;&lt;'CONF'
 [libdefaults]
     default_realm = __REALM__
@@ -382,8 +422,6 @@ sudo tee /etc/krb5.conf &gt;/dev/null &lt;&lt;'CONF'
     __DOMAIN__ = __REALM__
 CONF
 
-# 3. SSH over GSSAPI. Delegation stays off on purpose: SECURITY.md [CL1]. A
-#    non-forwardable ticket cannot be delegated even by a client that asks to.
 mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh
 cat &gt;&gt; ~/.ssh/config &lt;&lt;'CONF'
 Host *.__DOMAIN__
@@ -393,22 +431,12 @@ Host *.__DOMAIN__
 CONF
 chmod 600 ~/.ssh/config
 
-# 4. The realm CA. Compare against the hash IT gave you, then trust it. Without
-#    this, HTTPS to __MCP_URL__ fails with an opaque certificate error.
-curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
-shasum -a 256 /tmp/realm-ca.crt          # must equal the value from IT
-sudo security add-trusted-cert -d -r trustRoot \
-     -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
-
-# 5. The MCP bridge. Per-user, so no sudo. python-gssapi ships macOS wheels for
-#    both architectures, so there is no compiler and no Xcode tools involved.
 mkdir -p "$HOME/Library/Application Support/mcp-krb"
 cd "$HOME/Library/Application Support/mcp-krb"
 python3 -m venv venv
 venv/bin/pip install --quiet gssapi
 curl --proto '=https' --tlsv1.2 -fsS -o mcp-krb-bridge.py __BASE__/mcp-krb-bridge.py
 
-# 6. Register it, then get a ticket.
 claude mcp add --scope user internal-tools -- \
     "$HOME/Library/Application Support/mcp-krb/venv/bin/python3" \
     "$HOME/Library/Application Support/mcp-krb/mcp-krb-bridge.py" \
