@@ -18,5 +18,7 @@ window.SITE = {
   mcpUrl: 'https://mcp.example.internal/', // the Kerberized MCP API the bridge talks to
   caSha256: '',                           // sha256sum of /etc/ipa/ca.crt, optional (Windows/macOS CA pin)
   dnsIp: '',                              // resolver that answers for `domain`, optional (macOS split DNS)
-  supportEmail: ''                        // optional; blank leaves a generic "contact your IT team"
+  supportEmail: ''                        // optional; blank leaves a generic "contact your IT team",
+  downloadBase: ''                        // optional; only when the files are NOT beside the page.
+                                          // '/d' or a full URL. Blank means: same directory as this page.
 };
