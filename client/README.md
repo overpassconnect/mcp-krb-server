@@ -571,7 +571,7 @@ files (it does not for `-F`).
 Tickets expire and VS Code reconnects silently, so an expired ticket looks like
 the extension breaking. Run `wsl kinit -R`.
 
-## macOS (manual)
+## macOS
 
 `setup-macos.sh` is the macOS counterpart to `setup.sh` and `setup.ps1`, with one
 structural difference: a Mac never joins the realm. There is no

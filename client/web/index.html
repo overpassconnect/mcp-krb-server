@@ -8,6 +8,11 @@
   page infers it from where it is served (location), so the same bundle works
   from whatever host you copy it to. See config.example.js for the shape.
 
+  A deployment adds its own sections through CLIENT_SITE_SECTIONS, which
+  run.sh injects at the <!-- site-sections --> and <!-- site-nav --> markers
+  below. That is the supported way: hand-editing a served copy forks it from
+  this file and nothing can regenerate it.
+
   Nothing site-specific belongs in THIS file. It may be public. Realm-shaped
   strings you see below (__REALM__, __DOMAIN__, __KDC__, __MCP_URL__,
   __CA_SHA256__, __DNS_IP__, __BASE__) are markers app.js replaces in the
@@ -134,6 +139,7 @@
     <a class="on" href="#linux">Linux</a>
     <a href="#windows">Windows</a>
     <a href="#macos">macOS</a>
+    <!-- site-nav -->
     <a href="#artifacts">Artifacts</a>
   </nav>
   </aside>
@@ -450,6 +456,8 @@ claude mcp add --scope user internal-tools -- \
   </section>
 
   <div class="rule"></div>
+
+  <!-- site-sections -->
 
   <section id="artifacts">
     <h2>Artifacts</h2>

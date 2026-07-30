@@ -22,7 +22,8 @@ set -eu
 SITE_ENV="${SITE_ENV:-/etc/mcp-server/site.env}"
 FQDN=""; REALM=""; IPA_SERVER=""
 MCP_VENV=""; SVCUSER=""; SVCGROUP=""; WEBROOT=""
-NO_SERVE_CLIENT=0; CLIENT_EXPORT=""; CLIENT_PATH=""; CLIENT_ROOT=""
+NO_SERVE_CLIENT=0; CLIENT_EXPORT=""
+CLIENT_SITE_SECTIONS=""; CLIENT_PATH=""; CLIENT_ROOT=""
 CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
 CERT_MODE="acme"; CERT_PATH=""; WHEELHOUSE=""
@@ -46,6 +47,13 @@ usage: run.sh [options]
                          needs nothing extra. This turns that off, leaving the
                          vhost byte-identical to one that never had the feature.
                                                        (site.env: SERVE_CLIENT=no)
+  --client-site-sections FILE
+                         HTML fragment of extra <section> blocks to inject into
+                         the provisioning page, for content specific to this
+                         deployment. Nav entries are derived from each section's
+                         id and <h2>. Must be root-owned and not group-writable:
+                         it becomes markup on a page that tells people what to
+                         run as root.        (site.env: CLIENT_SITE_SECTIONS)
   --client-export DIR    also assemble the bundle into DIR, a local folder, for
                          copying off-band to wherever you serve static files.
                          Independent of serving here.  (site.env: CLIENT_EXPORT)
@@ -88,6 +96,8 @@ while [ $# -gt 0 ]; do
         --group)            SVCGROUP="$2"; shift ;;
         --webroot)          WEBROOT="$2"; shift ;;
         --no-serve-client)  NO_SERVE_CLIENT=1 ;;
+        --client-site-sections)   CLIENT_SITE_SECTIONS="$2"; shift ;;
+        --client-site-sections=*) CLIENT_SITE_SECTIONS="${1#--client-site-sections=}" ;;
         --client-export)    CLIENT_EXPORT="$2"; shift ;;
         --client-export=*)  CLIENT_EXPORT="${1#--client-export=}" ;;
         --client-path)      CLIENT_PATH="$2"; shift ;;
@@ -283,6 +293,7 @@ ARG_NO_SERVE_CLIENT="$NO_SERVE_CLIENT"; ARG_CLIENT_EXPORT="$CLIENT_EXPORT"
 ARG_CLIENT_PATH="$CLIENT_PATH"; ARG_CLIENT_ROOT="$CLIENT_ROOT"
 ARG_CLIENT_ORG_NAME="$CLIENT_ORG_NAME"; ARG_CLIENT_SUPPORT_EMAIL="$CLIENT_SUPPORT_EMAIL"
 ARG_CLIENT_DNS_IP="$CLIENT_DNS_IP"
+ARG_CLIENT_SITE_SECTIONS="$CLIENT_SITE_SECTIONS"
 
 if [ -f "$SITE_ENV" ]; then
     # shellcheck disable=SC1090
@@ -368,6 +379,7 @@ fi
 CLIENT_EXPORT="${ARG_CLIENT_EXPORT:-${CLIENT_EXPORT:-}}"
 CLIENT_PATH="${ARG_CLIENT_PATH:-${CLIENT_PATH:-/client/}}"
 CLIENT_ROOT="${ARG_CLIENT_ROOT:-${CLIENT_ROOT:-/var/www/client}}"
+CLIENT_SITE_SECTIONS="${ARG_CLIENT_SITE_SECTIONS:-${CLIENT_SITE_SECTIONS:-}}"
 CLIENT_ORG_NAME="${ARG_CLIENT_ORG_NAME:-${CLIENT_ORG_NAME:-}}"
 CLIENT_SUPPORT_EMAIL="${ARG_CLIENT_SUPPORT_EMAIL:-${CLIENT_SUPPORT_EMAIL:-}}"
 CLIENT_DNS_IP="${ARG_CLIENT_DNS_IP:-${CLIENT_DNS_IP:-}}"
@@ -1518,6 +1530,61 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
     # below rather than copied, so config.example.js ships as the shape
     # reference and the live config.js is generated per install.
     BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py web/index.html web/app.js web/config.example.js"
+    # Injects the site fragment into the page's markers and derives one nav
+    # entry per section from its id and <h2>. Refuses a fragment that is not
+    # root-owned or is group/world-writable: it becomes markup on the page that
+    # tells a workstation what to run as root, so it is code by another name.
+    inject_site_sections() {
+        _f="$CLIENT_SITE_SECTIONS"
+        case "$_f" in
+            /*) ;;
+            *) die "CLIENT_SITE_SECTIONS must be an absolute path, got '$_f'." ;;
+        esac
+        [ -f "$_f" ] || die "CLIENT_SITE_SECTIONS: no such file: $_f"
+        case "$_f" in
+            "$SRC"/*) die "CLIENT_SITE_SECTIONS must live outside $SRC: this script
+  converges that tree on the repository's file set and would delete it." ;;
+        esac
+        [ "$(stat -c %U "$_f")" = root ] \
+            || die "CLIENT_SITE_SECTIONS must be root-owned: $_f"
+        [ "$(stat -c %a "$_f" | sed 's/.*\(..\)$/\1/')" = 44 ] \
+            || [ -z "$(find "$_f" -perm /022)" ] \
+            || die "CLIENT_SITE_SECTIONS must not be group- or world-writable: $_f"
+
+        SECTIONS_FILE="$_f" /usr/bin/python3 - "$1" <<'PY' || die "injecting CLIENT_SITE_SECTIONS failed"
+import os, re, sys
+
+page = sys.argv[1]
+frag = open(os.environ["SECTIONS_FILE"], encoding="utf-8").read()
+
+with open(page, encoding="utf-8") as f:
+    html = f.read()
+
+for marker in ("<!-- site-sections -->", "<!-- site-nav -->"):
+    if marker not in html:
+        sys.stderr.write("the page has no %s marker\n" % marker)
+        sys.exit(1)
+
+# One nav entry per top-level section, labelled by its <h2> with any tag
+# markup (icons, <span class="tag">) stripped back to plain text.
+nav = []
+for sid, h2 in re.findall(r'<section[^>]*\bid="([^"]+)"[^>]*>\s*<h2[^>]*>(.*?)</h2>', frag, re.S):
+    label = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", h2)).strip()
+    nav.append('    <a href="#%s">%s</a>' % (sid, label))
+if not nav:
+    sys.stderr.write("no <section id=...><h2> found in the fragment; nothing to link\n")
+    sys.exit(1)
+
+html = html.replace("<!-- site-nav -->", "\n".join(nav).lstrip(), 1)
+html = html.replace("<!-- site-sections -->", frag.rstrip() + "\n", 1)
+
+with open(page, "w", encoding="utf-8", newline="") as f:
+    f.write(html)
+print("  injected %d site section(s): %s" % (len(nav), ", ".join(
+    re.findall(r'<section[^>]*\bid="([^"]+)"', frag))))
+PY
+    }
+
     assemble_bundle() {
         _bd="$1"; _cl="$SRC/client"
         for _f in $BUNDLE_FILES; do
@@ -1528,6 +1595,12 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
         for _f in $BUNDLE_FILES; do
             install -m 0644 "$_cl/$_f" "$_bd/$(basename "$_f")"
         done
+        # A deployment's own page sections. Same reasoning as MCP_SITE_TOOLS:
+        # the content names internal hosts, so it cannot live in this repository,
+        # and it must not be hand-patched into the served copy either, because
+        # the next install would overwrite it and nothing would regenerate it.
+        [ -n "$CLIENT_SITE_SECTIONS" ] && inject_site_sections "$_bd/index.html"
+
         # Converge, do not merely add. This step used to only install, so any
         # file ever published stayed published: after install.sh was renamed to
         # install-bridge.sh, hosts went on serving BOTH, and the stale one was a
