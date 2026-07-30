@@ -13,7 +13,7 @@
 #                     is a fleet decision, not a per-user one.
 #
 # Everything removed or restored here is justified by an entry in
-# /opt/mcp-krb/install-manifest.json saying the installer created or replaced
+# an install-manifest.json saying the installer created or replaced
 # it. No manifest means no guessing: the script prints what a manifest would
 # have told it and exits non-zero, because an uninstaller that improvises
 # either leaves things behind or deletes things it did not install.
@@ -65,18 +65,37 @@ if [ -z "$ROOT" ] && [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
 
 say() { printf '%s\n' "$*"; }
 
-MANIFEST="$ROOT/opt/mcp-krb/install-manifest.json"
+# Where the installers put things differs by platform. A Mac has no /opt
+# convention and setup-macos.sh needs no sudo for the bridge, so its tree
+# lives under the user's Library; the machine-wide MCP policy has its own
+# macOS location too.
+if [ "$(uname -s)" = Darwin ]; then
+    APPROOT="$HOME/Library/Application Support/mcp-krb"
+    MANAGED_FILE="/Library/Application Support/ClaudeCode/managed-mcp.json"
+else
+    APPROOT="/opt/mcp-krb"
+    MANAGED_FILE="/etc/claude-code/managed-mcp.json"
+fi
+
+MANIFEST="$ROOT$APPROOT/install-manifest.json"
 
 if [ ! -f "$MANIFEST" ]; then
     say "ERROR: no install manifest at $MANIFEST - refusing to guess."
     say ""
     say "The manifest is what records which of the following this kit actually"
     say "created on THIS machine, as opposed to what was already here:"
-    say "  /opt/mcp-krb                                (bridge, backups, manifest)"
-    say "  /etc/claude-code/managed-mcp.json           (only if --managed was used)"
-    say "  /usr/local/share/ca-certificates/realm-ca.crt   (WSL only)"
-    say "  /etc/krb5.conf                              (WSL only, replaced with backup)"
-    say "  krb5-user, python3-gssapi                   (WSL only, if apt installed them)"
+    say "  $APPROOT   (bridge, backups, manifest)"
+    say "  $MANAGED_FILE   (only if --managed was used)"
+    if [ "$(uname -s)" = Darwin ]; then
+        say "  /etc/resolver/<domain>                      (split DNS)"
+        say "  /etc/krb5.conf                              (replaced with backup)"
+        say "  the realm CA in /Library/Keychains/System.keychain"
+        say "  the Host block in ~/.ssh/config"
+    else
+        say "  /usr/local/share/ca-certificates/realm-ca.crt   (WSL only)"
+        say "  /etc/krb5.conf                              (WSL only, replaced with backup)"
+        say "  krb5-user, python3-gssapi                   (WSL only, if apt installed them)"
+    fi
     say ""
     say "Without it, removing any of these may delete something the machine had"
     say "before this kit arrived. Review the list and remove by hand what you"
@@ -114,6 +133,8 @@ dump('created', doc.get('created', []))
 dump('created_dirs', doc.get('created_dirs', []))
 dump('packages', doc.get('packages_installed', []))
 dump('replaced', ['%s\t%s' % (k, v) for k, v in doc.get('replaced', {}).items()])
+# Not a path: removing it is a keychain operation, so it gets its own step.
+dump('cert_sha1', [doc['trusted_cert_sha1']] if doc.get('trusted_cert_sha1') else [])
 PY
 
 # A manifest is data, not authority: only paths this kit is known to own may be
@@ -121,9 +142,11 @@ PY
 # arbitrary file.
 path_is_ours() {
     case "$1" in
-        /opt/mcp-krb|/opt/mcp-krb/*) return 0 ;;
+        "$APPROOT"|"$APPROOT"/*) return 0 ;;
         /etc/claude-code|/etc/claude-code/*) return 0 ;;
+        "$MANAGED_FILE") return 0 ;;
         /etc/krb5.conf) return 0 ;;
+        /etc/resolver/*) return 0 ;;
         /usr/local/share/ca-certificates/*) return 0 ;;
         *) return 1 ;;
     esac
@@ -133,7 +156,6 @@ if [ "$YES" = 1 ]; then say "Uninstalling per $MANIFEST:"; else say "DRY RUN - t
 
 # 1. The MCP registration comes out first, so no session can launch a bridge
 #    this run is about to delete.
-MANAGED_FILE="/etc/claude-code/managed-mcp.json"
 CREATED_MANAGED=0
 grep -qx "$MANAGED_FILE" "$tmp/created" && CREATED_MANAGED=1
 if [ -f "$ROOT$MANAGED_FILE" ]; then
@@ -150,13 +172,13 @@ fi
 say "  note: a per-user registration made with 'claude mcp add' is yours, not"
 say "  the installer's: remove it with 'claude mcp remove internal-tools'."
 
-# 2. Files the manifest says an installer created, except /opt/mcp-krb's own
+# 2. Files the manifest says an installer created, except the kit tree's own
 #    contents (the whole tree goes in step 3) and the realm CA (step 6, because
 #    its removal has a trust-store refresh attached).
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
-        /opt/mcp-krb/*) continue ;;
+        "$APPROOT"/*) continue ;;
         /usr/local/share/ca-certificates/*) continue ;;
         "$MANAGED_FILE") continue ;;
     esac
@@ -175,12 +197,32 @@ done < "$tmp/created"
 # 3. The kit's own tree. The backups inside it are staged out first so step 5
 #    can still restore them; the manifest dies with the tree, which is correct,
 #    because after this run it no longer describes the machine.
-if [ -d "$ROOT/opt/mcp-krb" ]; then
-    say "  remove /opt/mcp-krb"
-    if [ -d "$ROOT/opt/mcp-krb/backup" ]; then
-        cp -pR "$ROOT/opt/mcp-krb/backup" "$tmp/staged-backup"
+if [ -d "$ROOT$APPROOT" ]; then
+    say "  remove $APPROOT"
+    if [ -d "$ROOT$APPROOT/backup" ]; then
+        cp -pR "$ROOT$APPROOT/backup" "$tmp/staged-backup"
     fi
-    if [ "$YES" = 1 ]; then $SUDO rm -rf "$ROOT/opt/mcp-krb"; fi
+    # setup-macos.sh keeps the original krb5.conf here rather than in a
+    # backup/ subdirectory, so stage that too or step 5 has nothing to
+    # restore from.
+    if [ -f "$ROOT$APPROOT/krb5.conf.orig" ]; then
+        cp -p "$ROOT$APPROOT/krb5.conf.orig" "$tmp/krb5.conf.orig"
+    fi
+    if [ "$YES" = 1 ]; then $SUDO rm -rf "$ROOT$APPROOT"; fi
+fi
+
+# 3b. The realm CA in the macOS keychain. Note the algorithm: the installer
+#     verified the download against its SHA-256, but delete-certificate
+#     matches on SHA-1 only, so that is what the manifest records. Passing a
+#     SHA-256 here matches nothing and reports success.
+if [ -s "$tmp/cert_sha1" ]; then
+    cert_sha1=$(cat "$tmp/cert_sha1")
+    say "  remove the realm CA from the System keychain (SHA-1 $cert_sha1)"
+    if [ "$YES" = 1 ] && [ -z "$ROOT" ]; then
+        $SUDO security delete-certificate -t -Z "$cert_sha1" \
+            /Library/Keychains/System.keychain \
+            || say "  (delete-certificate failed; remove it in Keychain Access)"
+    fi
 fi
 
 # 4. Packages, and only the ones the manifest says an installer put here. A
