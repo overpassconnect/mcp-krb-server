@@ -1517,7 +1517,7 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
     # config.js writing live in one place. config.js is written by write_config
     # below rather than copied, so config.example.js ships as the shape
     # reference and the live config.js is generated per install.
-    BUNDLE_FILES="setup.sh setup.ps1 install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py web/index.html web/app.js web/config.example.js"
+    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py web/index.html web/app.js web/config.example.js"
     assemble_bundle() {
         _bd="$1"; _cl="$SRC/client"
         for _f in $BUNDLE_FILES; do

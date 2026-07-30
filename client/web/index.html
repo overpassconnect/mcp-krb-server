@@ -133,7 +133,7 @@
   <nav class="os">
     <a class="on" href="#linux">Linux</a>
     <a href="#windows">Windows</a>
-    <a href="#macos">macOS (manual)</a>
+    <a href="#macos">macOS</a>
     <a href="#artifacts">Artifacts</a>
   </nav>
   </aside>
@@ -280,15 +280,56 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     if asked, then re-run. The script is idempotent, so a second run is safe.</p>
   </section>
 
-  <section id="macos" class="pending">
-    <h2>macOS<span class="tag pending">manual</span></h2>
+  <section id="macos">
+    <h2>macOS</h2>
 
-    <p class="note"><strong>There is no macOS script.</strong> Linux gets a real FreeIPA
-    enrolment from <code>setup.sh</code> and Windows gets <code>setup.ps1</code>; a Mac gets
-    neither. What follows is a hand-written faux-enrolment: it configures the Kerberos client
-    only, it does not join the machine to the realm, and nothing about it is automated or
-    idempotent. It was worked out and proven on a live Mac, so it works, but treat it as a
-    procedure you read rather than a command you paste blindly.</p>
+    <p class="note">A Mac does not join the realm: there is no
+    <code>ipa-client-install</code> for it, so this configures the Kerberos client and nothing
+    more. The realm never learns the machine exists. Everything below is that configuration,
+    either as one script or as the steps it runs.</p>
+
+    <div class="fill" data-fill="mac-script">
+      <label>Your IPA username
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;your-ipa-username&gt;"
+               placeholder="jdoe">
+      </label>
+      <label>Realm CA SHA-256 (from IT, not from this page)
+        <input type="text" autocomplete="off" spellcheck="false"
+               data-token="&lt;ca-sha256&gt;"
+               placeholder="paste the value you were given">
+      </label>
+    </div>
+<pre><code id="mac-script">cd "$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup-macos.sh -o setup-macos.sh
+
+# Read it first if you like; --dry-run prints the plan and changes nothing.
+sh setup-macos.sh \
+    --domain __DOMAIN__ \
+    --realm __REALM__ \
+    --kdc __KDC__ \
+    --dns-ip __DNS_IP__ \
+    --ipa-user &lt;your-ipa-username&gt; \
+    --base-url __BASE__ \
+    --mcp-url __MCP_URL__ \
+    --ca-sha256 &lt;ca-sha256&gt;
+
+kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
+
+    <p class="note">Drop <code>--ca-sha256</code> and the realm CA step is skipped, which is
+    fine unless you need HTTPS to <code>__MCP_URL__</code>; <code>kinit</code> and
+    <code>ssh</code> never use it. Drop <code>--mcp-url</code> and you get realm SSO without
+    the bridge. Add <code>--managed</code> to register the bridge for every user on the
+    machine rather than just you, which takes exclusive control of MCP configuration.</p>
+
+    <p class="note"><strong>Use the hash IT gave you, not the one further down this page.</strong>
+    That copy is a convenience for spotting an obvious mismatch, but it is served by the same
+    infrastructure as the certificate, so on its own it checks that infrastructure against
+    itself. If the two disagree, stop.</p>
+
+    <p class="note">The rest of this section is what the script does, step by step. Read it if
+    you want to understand the machine you are about to change, or follow it by hand if you
+    would rather not run a downloaded script. It was worked out and proven on a live Mac.</p>
 
     <p class="note"><strong>Read this before you debug anything.</strong> The KDC line must be
     <code>kdc = tcp/__KDC__</code>, with the <code>tcp/</code> prefix. macOS ships
@@ -412,7 +453,7 @@ claude mcp add --scope user internal-tools -- \
 
   <section id="artifacts">
     <h2>Artifacts</h2>
-    <p class="note">Five files, flat, and that is the whole set. Nothing here is signed. There
+    <p class="note">Six files, flat, and that is the whole set. Nothing here is signed. There
     is no checksum manifest and no signature to check: transport is TLS and TLS alone, so
     whoever controls this host controls what runs on your machine. That trade is written up in
     SECURITY.md&nbsp;[SC1].</p>
@@ -422,6 +463,7 @@ claude mcp add --scope user internal-tools -- \
       <tr><td><a data-file="install-bridge.sh">install-bridge.sh</a></td><td>Linux, bridge install on an already-enrolled machine</td></tr>
       <tr><td><a data-file="setup.ps1">setup.ps1</a></td><td>Windows, Kerberos SSH via WSL2, and VS Code</td></tr>
       <tr><td><a data-file="JsoncEdit.ps1">JsoncEdit.ps1</a></td><td>Windows, fetched by setup.ps1 for the VS Code step only</td></tr>
+      <tr><td><a data-file="setup-macos.sh">setup-macos.sh</a></td><td>macOS, Kerberos client and bridge; no realm enrolment</td></tr>
       <tr><td><a data-file="mcp-krb-bridge.py">mcp-krb-bridge.py</a></td><td>the MCP bridge itself, fetched by the installers</td></tr>
     </table>
   </section>
