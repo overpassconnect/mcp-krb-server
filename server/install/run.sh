@@ -1592,7 +1592,9 @@ for name in ("<!-- site-sections -->", "<!-- site-nav -->"):
 # markup (icons, <span class="tag">) stripped back to plain text.
 nav = []
 for sid, h2 in re.findall(r'<section[^>]*\bid="([^"]+)"[^>]*>\s*<h2[^>]*>(.*?)</h2>', frag, re.S):
-    label = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", h2)).strip()
+    # Replace tags with a space, not nothing: an <h2> ending in a
+    # <span class="tag"> otherwise renders as "TitleIT only" in the nav.
+    label = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", h2)).strip()
     nav.append('    <a href="#%s">%s</a>' % (sid, label))
 if not nav:
     sys.stderr.write("no <section id=...><h2> found in the fragment; nothing to link\n")

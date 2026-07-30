@@ -87,8 +87,17 @@ class TestInjection(unittest.TestCase):
         frag = ('<section id="ct"><h2><img src="i.svg" alt="">Containers'
                 '<span class="tag">IT only</span></h2></section>')
         _, out = run_injector(MINIMAL, frag)
-        self.assertIn('<a href="#ct">ContainersIT only</a>', out)
+        self.assertIn('<a href="#ct">Containers IT only</a>', out)
         self.assertNotIn('<a href="#ct"><img', out)
+
+    def test_a_trailing_tag_span_does_not_run_into_the_title(self):
+        # Shipped as "Proxmox containerIT only" in the live nav: stripping tags
+        # to nothing joins the title to its badge. Tags become a space instead.
+        frag = ('<section id="ct"><h2>Proxmox container'
+                '<span class="tag">IT only</span></h2></section>')
+        _, out = run_injector(MINIMAL, frag)
+        self.assertNotIn("containerIT", out)
+        self.assertIn('<a href="#ct">Proxmox container IT only</a>', out)
 
     def test_several_sections_each_get_an_entry(self):
         frag = ('<section id="a"><h2>Alpha</h2></section>\n'
