@@ -309,8 +309,11 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     Every host here presents a certificate signed by the realm's own CA, which a fresh Mac has
     never heard of, so HTTPS to this site fails until the CA is trusted. The certificate itself
     is fetched over plain <em>HTTP</em>, needing no trust, and the hash is what makes that safe:
-    the first command below refuses to install anything whose SHA-256 does not match the value
-    you were given. Either spelling of that value works: the hash of the PEM file, which is
+    the first command below refuses to install anything whose SHA-256 does not match. The value
+    is filled in for you, which is convenient and proves nothing on its own: this page comes
+    from the same infrastructure as the certificate, so it would agree with a forgery just as
+    readily. Compare it against the value your IT team gave you before you run it. On an
+    already-enrolled machine, <code>sha256sum /etc/ipa/ca.crt</code> is the same check. Either spelling of that value works: the hash of the PEM file, which is
     what <code>sha256sum /etc/ipa/ca.crt</code> prints on an enrolled host, or the DER
     fingerprint a browser's certificate dialog shows, with or without its colons. They are
     different strings for the same certificate. Do not reach for <code>curl -k</code> to get past this. That would fetch a
@@ -329,13 +332,8 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
                data-token="&lt;your-ipa-username&gt;"
                placeholder="jdoe">
       </label>
-      <label>Realm CA SHA-256, from IT and not from this page
-        <input type="text" autocomplete="off" spellcheck="false"
-               data-token="&lt;ca-sha256&gt;"
-               placeholder="paste the value you were given">
-      </label>
     </div>
-<pre><code id="mac-script">CA_SHA=&lt;ca-sha256&gt;
+<pre><code id="mac-script">CA_SHA=__CA_SHA256__
 
 curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
 echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
@@ -387,13 +385,8 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
                data-token="&lt;your-ipa-username&gt;"
                placeholder="jdoe">
       </label>
-      <label>Realm CA SHA-256, from IT
-        <input type="text" autocomplete="off" spellcheck="false"
-               data-token="&lt;ca-sha256&gt;"
-               placeholder="paste the value you were given">
-      </label>
     </div>
-<pre><code id="mac-manual">CA_SHA=&lt;ca-sha256&gt;
+<pre><code id="mac-manual">CA_SHA=__CA_SHA256__
 
 curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
 echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
