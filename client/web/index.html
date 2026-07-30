@@ -333,13 +333,13 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
                placeholder="jdoe">
       </label>
     </div>
-<pre><code id="mac-script">CA_SHA=__CA_SHA256__
-
+<pre><code id="mac-script">__CA_BEGIN__
 curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
-echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
+echo "__CA_SHA256__  /tmp/realm-ca.crt" | shasum -a 256 -c - \
   &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
        -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
 
+__CA_END__
 cd "$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup-macos.sh -o setup-macos.sh
 
@@ -351,7 +351,7 @@ sh setup-macos.sh \
     --ipa-user &lt;your-ipa-username&gt; \
     --base-url __BASE__ \
     --mcp-url __MCP_URL__ \
-    --ca-sha256 "$CA_SHA"
+    __CA_ARG__
 
 kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
 
@@ -386,13 +386,13 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
                placeholder="jdoe">
       </label>
     </div>
-<pre><code id="mac-manual">CA_SHA=__CA_SHA256__
-
+<pre><code id="mac-manual">__CA_BEGIN__
 curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
-echo "$CA_SHA  /tmp/realm-ca.crt" | shasum -a 256 -c - \
+echo "__CA_SHA256__  /tmp/realm-ca.crt" | shasum -a 256 -c - \
   &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
        -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
 
+__CA_END__
 sudo mkdir -p /etc/resolver
 printf 'nameserver __DNS_IP__\n' | sudo tee /etc/resolver/__DOMAIN__ &gt;/dev/null
 

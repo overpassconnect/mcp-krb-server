@@ -62,6 +62,33 @@ class TestClientConfigKeys(unittest.TestCase):
         self.assertIn("downloadBase", keys_config_example_documents())
         self.assertIn("CLIENT_DOWNLOAD_BASE", RUN_SH.read_text(encoding="utf-8"))
 
+    def test_ca_toggle_is_wired_through_every_layer(self):
+        page = (ROOT / "client" / "web" / "index.html").read_text(encoding="utf-8")
+        app = APP_JS.read_text(encoding="utf-8")
+        for marker in ("__CA_BEGIN__", "__CA_END__", "__CA_ARG__"):
+            self.assertIn(marker, page, "%s missing from the page" % marker)
+        self.assertIn("__CA_ARG__", app, "app.js does not substitute __CA_ARG__")
+        self.assertIn("__CA_BEGIN__", app, "app.js does not handle the stanza markers")
+        self.assertIn("caInstall", keys_app_js_reads())
+        self.assertIn("caInstall", keys_run_sh_emits())
+        self.assertIn("CLIENT_CA_INSTALL", RUN_SH.read_text(encoding="utf-8"))
+
+    def test_ca_markers_never_survive_into_a_rendered_block(self):
+        # Whichever way the toggle goes, the markers themselves must be gone:
+        # a leftover __CA_BEGIN__ would be pasted into a shell as a command.
+        app = APP_JS.read_text(encoding="utf-8")
+        self.assertRegex(app, r"__CA_\(\?:BEGIN\|END\)__",
+                         "app.js must strip the markers when the CA step is kept")
+        self.assertRegex(app, r"__CA_BEGIN__[\s\S]{0,80}__CA_END__",
+                         "app.js must drop the whole stanza when the CA step is off")
+
+    def test_skip_ca_exists_for_the_toggle_to_target(self):
+        # __CA_ARG__ resolves to --skip-ca; the script has to accept it, or the
+        # page emits a command that dies on an unknown argument.
+        macos = (ROOT / "client" / "setup-macos.sh").read_text(encoding="utf-8")
+        self.assertIn("--skip-ca)", macos)
+        self.assertIn("'--skip-ca'", APP_JS.read_text(encoding="utf-8"))
+
     def test_download_base_defaults_to_the_pages_own_directory(self):
         # Blank must keep the old behaviour, or every existing deployment breaks
         # on upgrade.

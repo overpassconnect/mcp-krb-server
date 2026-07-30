@@ -56,10 +56,30 @@
     '__KDC__': SITE.kdc || '<set kdc in config.js>',
     '__MCP_URL__': SITE.mcpUrl || '<set mcpUrl in config.js>',
     '__CA_SHA256__': SITE.caSha256 || '<set caSha256 in config.js>',
+    /* The whole CA argument, so a site that distributes the certificate by
+     * other means (MDM, a golden image) does not hand people a step they
+     * would be doing twice. caInstall defaults to true when unset, which
+     * keeps every existing config.js behaving as it did. */
+    '__CA_ARG__': (SITE.caInstall === false)
+      ? '--skip-ca'
+      : '--ca-sha256 ' + (SITE.caSha256 || '<set caSha256 in config.js>'),
     '__DNS_IP__': SITE.dnsIp || '<set dnsIp in config.js>'
   };
 
+  /* The CA stanza is bracketed by markers rather than commented out, because
+   * macOS is zsh and zsh does not treat # as a comment interactively: a
+   * commented-out block would paste as "command not found: #". With caInstall
+   * false the whole stanza goes; otherwise only the markers do, leaving a block
+   * that can be pasted as it stands. */
+  function applyCaBlock(text) {
+    if (SITE.caInstall === false) {
+      return text.replace(/^__CA_BEGIN__\n[\s\S]*?^__CA_END__\n/m, '');
+    }
+    return text.replace(/^__CA_(?:BEGIN|END)__\n/gm, '');
+  }
+
   function applySite(text) {
+    text = applyCaBlock(text);
     for (var k in MAP) {
       if (MAP.hasOwnProperty(k)) { text = text.split(k).join(MAP[k]); }
     }

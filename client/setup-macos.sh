@@ -30,7 +30,11 @@
 #   sh setup-macos.sh --domain example.internal --realm EXAMPLE.INTERNAL \
 #       --kdc ipa.example.internal --dns-ip 10.0.0.53 --ipa-user jdoe \
 #       [--mcp-url https://mcp.example.internal/] [--base-url URL] \
-#       --ca-sha256 HEX [--skip-mcp] [--managed] [--dry-run]
+#       --ca-sha256 HEX [--skip-ca] [--skip-mcp] [--managed] [--dry-run]
+#
+#   --skip-ca  do not install the realm CA. For machines where it already
+#              arrives another way, MDM or a golden image. It is still
+#              required: without it HTTPS to the MCP host fails.
 #
 #   --managed  register machine-wide in /Library/Application Support/ClaudeCode/
 #              managed-mcp.json instead of the user's ~/.claude.json. Mirrors
@@ -41,7 +45,7 @@ set -eu
 
 DOMAIN=''; REALM=''; KDC=''; DNS_IP=''; IPA_USER=''
 MCP_URL=''; BASE_URL=''; CA_SHA=''
-SKIP_MCP=0; DRY_RUN=0; MANAGED=0
+SKIP_CA=0; SKIP_MCP=0; DRY_RUN=0; MANAGED=0
 CERT_SHA1=''
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
         --base-url)   BASE_URL="$2"; shift 2 ;;
         --ca-sha256)  CA_SHA="$2"; shift 2 ;;
         --skip-mcp)   SKIP_MCP=1; shift ;;
+        --skip-ca)    SKIP_CA=1; shift ;;
         --managed)    MANAGED=1; shift ;;
         --dry-run)    DRY_RUN=1; shift ;;
         -h|--help)    usage ;;
@@ -88,8 +93,9 @@ fi
 # out of band: the certificate is fetched over plain HTTP, so comparing it
 # against a hash from the same infrastructure would be checking it against
 # itself.
-[ -n "$CA_SHA" ]   || die "--ca-sha256 is required. Ask whoever runs the realm
-  for the SHA-256 of its CA, and do not take it from the provisioning page."
+[ "$SKIP_CA" = 1 ] || [ -n "$CA_SHA" ] || die "--ca-sha256 is required, or pass
+  --skip-ca if the certificate reaches this machine another way. Ask whoever
+  runs the realm for the SHA-256 of its CA."
 
 command -v python3 >/dev/null || die "python3 not found; run: xcode-select --install"
 if [ "$DRY_RUN" != 1 ]; then
@@ -220,6 +226,10 @@ fi
 # expected value has to reach the operator from somewhere other than the
 # infrastructure serving the certificate.
 echo "==> 4. realm CA"
+if [ "$SKIP_CA" = 1 ]; then
+    say "skipped (--skip-ca). HTTPS to the MCP host will fail unless the"
+    say "certificate is already trusted by other means."
+else
     ca=$(mktemp)
     curl -fsS -o "$ca" "http://$KDC/ipa/config/ca.crt" || die "could not fetch the CA"
 
@@ -256,6 +266,7 @@ echo "==> 4. realm CA"
         say "recorded for removal (SHA-1): $CERT_SHA1"
     fi
     rm -f "$ca"
+fi
 
 # ------------------------------------------------------- 5. the MCP bridge
 # python-gssapi ships macOS wheels for x86_64 and arm64, so no compiler is

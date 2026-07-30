@@ -23,7 +23,7 @@ SITE_ENV="${SITE_ENV:-/etc/mcp-server/site.env}"
 FQDN=""; REALM=""; IPA_SERVER=""
 MCP_VENV=""; SVCUSER=""; SVCGROUP=""; WEBROOT=""
 NO_SERVE_CLIENT=0; CLIENT_EXPORT=""
-CLIENT_SITE_SECTIONS=""; CLIENT_DOWNLOAD_BASE=""; CLIENT_PATH=""; CLIENT_ROOT=""
+CLIENT_SITE_SECTIONS=""; CLIENT_DOWNLOAD_BASE=""; CLIENT_CA_INSTALL=""; CLIENT_PATH=""; CLIENT_ROOT=""
 CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
 CERT_MODE="acme"; CERT_PATH=""; WHEELHOUSE=""
@@ -68,6 +68,12 @@ usage: run.sh [options]
                          serving a landing page at / and artifacts under /d/
                          needs '/d'; the page infers its own directory
                          otherwise.        (site.env: CLIENT_DOWNLOAD_BASE)
+  --client-ca-install yes|no
+                         whether the provisioning flow installs the realm CA
+                         into the workstation's trust store. Default yes. Set
+                         no where the CA arrives another way, MDM or a golden
+                         image, so the page stops telling people to do it a
+                         second time.       (site.env: CLIENT_CA_INSTALL)
   --client-dns-ip IP     resolver for the macOS split-DNS snippet, optional
                          (default: derived from this host)  (site.env: CLIENT_DNS_IP)
   --cert-mode MODE       acme (default) | existing | none
@@ -115,6 +121,8 @@ while [ $# -gt 0 ]; do
         --client-support-email=*) CLIENT_SUPPORT_EMAIL="${1#--client-support-email=}" ;;
         --client-download-base)   CLIENT_DOWNLOAD_BASE="$2"; shift ;;
         --client-download-base=*) CLIENT_DOWNLOAD_BASE="${1#--client-download-base=}" ;;
+        --client-ca-install)   CLIENT_CA_INSTALL="$2"; shift ;;
+        --client-ca-install=*) CLIENT_CA_INSTALL="${1#--client-ca-install=}" ;;
         --client-dns-ip)    CLIENT_DNS_IP="$2"; shift ;;
         --client-dns-ip=*)  CLIENT_DNS_IP="${1#--client-dns-ip=}" ;;
         --cert-mode)        CERT_MODE="$2"; shift ;;
@@ -302,6 +310,7 @@ ARG_CLIENT_ORG_NAME="$CLIENT_ORG_NAME"; ARG_CLIENT_SUPPORT_EMAIL="$CLIENT_SUPPOR
 ARG_CLIENT_DNS_IP="$CLIENT_DNS_IP"
 ARG_CLIENT_SITE_SECTIONS="$CLIENT_SITE_SECTIONS"
 ARG_CLIENT_DOWNLOAD_BASE="$CLIENT_DOWNLOAD_BASE"
+ARG_CLIENT_CA_INSTALL="$CLIENT_CA_INSTALL"
 
 if [ -f "$SITE_ENV" ]; then
     # shellcheck disable=SC1090
@@ -389,6 +398,11 @@ CLIENT_PATH="${ARG_CLIENT_PATH:-${CLIENT_PATH:-/client/}}"
 CLIENT_ROOT="${ARG_CLIENT_ROOT:-${CLIENT_ROOT:-/var/www/client}}"
 CLIENT_SITE_SECTIONS="${ARG_CLIENT_SITE_SECTIONS:-${CLIENT_SITE_SECTIONS:-}}"
 CLIENT_DOWNLOAD_BASE="${ARG_CLIENT_DOWNLOAD_BASE:-${CLIENT_DOWNLOAD_BASE:-}}"
+CLIENT_CA_INSTALL="${ARG_CLIENT_CA_INSTALL:-${CLIENT_CA_INSTALL:-yes}}"
+case "$CLIENT_CA_INSTALL" in
+    yes|no) ;;
+    *) die "CLIENT_CA_INSTALL must be yes or no, got '$CLIENT_CA_INSTALL'." ;;
+esac
 CLIENT_ORG_NAME="${ARG_CLIENT_ORG_NAME:-${CLIENT_ORG_NAME:-}}"
 CLIENT_SUPPORT_EMAIL="${ARG_CLIENT_SUPPORT_EMAIL:-${CLIENT_SUPPORT_EMAIL:-}}"
 CLIENT_DNS_IP="${ARG_CLIENT_DNS_IP:-${CLIENT_DNS_IP:-}}"
@@ -1673,7 +1687,10 @@ PY
             # Blank is the normal case and means "the directory this page came
             # from". Only a host that serves the page and the files from
             # different paths needs it set.
-            printf "  downloadBase: '%s'\n"  "$(js_str "$CLIENT_DOWNLOAD_BASE")"
+            printf "  downloadBase: '%s',\n" "$(js_str "$CLIENT_DOWNLOAD_BASE")"
+            # Drives whether the page shows the CA step at all, and which
+            # argument the macOS command carries.
+            printf "  caInstall: %s\n" "$([ "$CLIENT_CA_INSTALL" = yes ] && echo true || echo false)"
             printf '%s\n' "};"
         } > "$1/config.js"
         chmod 0644 "$1/config.js"
