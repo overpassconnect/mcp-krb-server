@@ -208,6 +208,130 @@ function Invoke-WslScript {
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
 
+# --- install manifest --------------------------------------------------------
+# What this run changed on the Windows side, accumulated as the steps run and
+# written once at the very end, so the manifest only ever describes a run that
+# completed. The WSL side keeps its own manifest at
+# /opt/mcp-krb/install-manifest.json, written inside the distro by step 2 and
+# by install-bridge.sh, because the two filesystems are cleaned by two
+# different uninstallers.
+#
+# An uninstaller with no record of the prior state can only leave things behind
+# or delete things it did not install. The merge rules, shared with the shell
+# side: created/created_dirs merge as sets, and only what an installer created
+# may ever be removed; a package first recorded as already-present is never
+# reclassified as installed; replaced and prior_values keep the first record,
+# because only the first run saw the machine as the user had it. In
+# prior_values, keyed by settings file then by key, $null means the key was
+# absent (uninstall deletes it) and a string is the user's own raw JSON scalar
+# (uninstall restores it verbatim).
+$Manifest = @{
+    written_by               = 'setup.ps1'
+    created                  = @()
+    created_dirs             = @()
+    packages_installed       = @()
+    packages_already_present = @()
+    replaced                 = @{}
+    prior_values             = @{}
+}
+
+function Merge-InstallManifest {
+    param([Parameter(Mandatory)][string]$Path,
+          [Parameter(Mandatory)][hashtable]$Fragment)
+    $doc = $null
+    if (Test-Path $Path) {
+        try { $doc = [IO.File]::ReadAllText($Path) | ConvertFrom-Json }
+        catch {
+            # A corrupt record is still evidence; overwriting it would turn the
+            # next uninstall into guesswork.
+            Warn "manifest: $Path exists but is not JSON - refusing to overwrite it."
+            return
+        }
+    }
+    $out = [ordered]@{
+        manifest_version         = 1
+        written_by               = $Fragment.written_by
+        created                  = @()
+        created_dirs             = @()
+        packages_installed       = @()
+        packages_already_present = @()
+        replaced                 = @{}
+        prior_values             = @{}
+    }
+    if ($doc) {
+        foreach ($k in 'created', 'created_dirs', 'packages_installed', 'packages_already_present') {
+            if ($doc.PSObject.Properties.Name -contains $k) { $out[$k] = @($doc.$k) }
+        }
+        foreach ($k in 'replaced', 'prior_values') {
+            if ($doc.PSObject.Properties.Name -contains $k) {
+                $h = @{}
+                foreach ($p in $doc.$k.PSObject.Properties) { $h[$p.Name] = $p.Value }
+                $out[$k] = $h
+            }
+        }
+        if ($doc.PSObject.Properties.Name -contains 'claude_registration') {
+            $out['claude_registration'] = $doc.claude_registration
+        }
+        if ($doc.PSObject.Properties.Name -contains 'wsl_distro') {
+            $out['wsl_distro'] = $doc.wsl_distro
+        }
+    }
+    foreach ($i in @($Fragment.created))      { if ($out['created'] -notcontains $i)      { $out['created'] += $i } }
+    foreach ($i in @($Fragment.created_dirs)) { if ($out['created_dirs'] -notcontains $i) { $out['created_dirs'] += $i } }
+    foreach ($p in @($Fragment.packages_already_present)) {
+        if ($out['packages_installed'] -notcontains $p -and $out['packages_already_present'] -notcontains $p) {
+            $out['packages_already_present'] += $p
+        }
+    }
+    foreach ($p in @($Fragment.packages_installed)) {
+        if ($out['packages_already_present'] -notcontains $p -and $out['packages_installed'] -notcontains $p) {
+            $out['packages_installed'] += $p
+        }
+    }
+    foreach ($k in @($Fragment.replaced.Keys)) {
+        if (-not $out['replaced'].ContainsKey($k)) { $out['replaced'][$k] = $Fragment.replaced[$k] }
+    }
+    foreach ($file in @($Fragment.prior_values.Keys)) {
+        if (-not $out['prior_values'].ContainsKey($file)) {
+            $out['prior_values'][$file] = @{}
+        } elseif ($out['prior_values'][$file] -isnot [hashtable]) {
+            $h = @{}
+            foreach ($p in $out['prior_values'][$file].PSObject.Properties) { $h[$p.Name] = $p.Value }
+            $out['prior_values'][$file] = $h
+        }
+        foreach ($k in @($Fragment.prior_values[$file].Keys)) {
+            if (-not $out['prior_values'][$file].ContainsKey($k)) {
+                $out['prior_values'][$file][$k] = $Fragment.prior_values[$file][$k]
+            }
+        }
+    }
+    if ($Fragment.ContainsKey('claude_registration')) {
+        $out['claude_registration'] = $Fragment.claude_registration
+    }
+    if ($Fragment.ContainsKey('wsl_distro')) {
+        $out['wsl_distro'] = $Fragment.wsl_distro
+    }
+    $json = $out | ConvertTo-Json -Depth 6
+    # No BOM, same reason as .claude.json below: 5.1's utf8 writes one and JSON
+    # readers choke on it.
+    [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+# The raw JSON scalar a key currently has in a JSONC document, found through
+# the same masked search Set-JsoncKey uses, so a commented-out copy of the key
+# is never matched. $null means absent, or a non-scalar value, which
+# Set-JsoncKey refuses to touch anyway, so nothing is recorded for it either.
+# Only called after JsoncEdit.ps1 has been dot-sourced (it needs Get-JsoncMask).
+function Get-JsoncScalarRaw {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+          [Parameter(Mandatory)][string]$Key)
+    $mask = Get-JsoncMask $Text
+    $esc = [regex]::Escape($Key)
+    $m = [regex]::Match($mask, '("' + $esc + '"\s*:\s*)("(?:[^"\\]|\\.)*"|true|false|null|-?[\d.]+(?:[eE][-+]?\d+)?)')
+    if ($m.Success) { return $Text.Substring($m.Groups[2].Index, $m.Groups[2].Length) }
+    return $null
+}
+
 # --- 1. WSL2 (skipped entirely if a distro already exists) ------------------
 $distros = @(Get-WslDistros)
 if ($distros.Count -gt 0) {
@@ -262,18 +386,38 @@ $caWant = $CaSha256.ToLower()
 $bash = @"
 set -e
 export DEBIAN_FRONTEND=noninteractive
+# Name the distro actually being provisioned, from inside it. uninstall.ps1
+# must clean this distro and not whatever the default happens to be by then
+# (Docker Desktop loves to steal the default), so the manifest records it.
+echo "DISTRO=`$WSL_DISTRO_NAME"
 # Two independent prerequisites: krb5-user provides kinit for SSH, python3-gssapi
 # is what the MCP bridge imports. The previous guard tested kinit only,
 # so a workstation that already had krb5-user skipped the apt step entirely and
 # the bridge later died with 'missing Kerberos support: install python3-gssapi'.
 need=''
-command -v kinit >/dev/null 2>&1 || need="`$need krb5-user"
-python3 -c 'import gssapi' >/dev/null 2>&1 || need="`$need python3-gssapi"
+present=''
+if command -v kinit >/dev/null 2>&1; then present="`$present krb5-user"; else need="`$need krb5-user"; fi
+if python3 -c 'import gssapi' >/dev/null 2>&1; then present="`$present python3-gssapi"; else need="`$need python3-gssapi"; fi
 if [ -n "`$need" ]; then
   apt-get update -qq >/dev/null 2>&1 || true
   # Deliberately unquoted so the package names word-split. The value is
   # script-literal, never user input.
   apt-get install -y -qq `$need >/tmp/krb5-install.log 2>&1 || { echo 'APT FAILED'; tail -15 /tmp/krb5-install.log; exit 1; }
+fi
+# Back up the distro's krb5.conf before the heredoc below replaces it, and only
+# when no backup exists yet: the first run sees the file as the distro (or the
+# user) had it, and a re-run must not overwrite that with this kit's own
+# rendering. The manifest at the end records the backup so uninstall restores
+# it instead of just deleting.
+optdir_new=0
+[ -d /opt/mcp-krb ] || optdir_new=1
+mkdir -p /opt/mcp-krb/backup
+replaced=0
+if [ -f /etc/krb5.conf ]; then
+  [ -f /opt/mcp-krb/backup/krb5.conf ] || cp -p /etc/krb5.conf /opt/mcp-krb/backup/krb5.conf
+  replaced=1
+elif [ -f /opt/mcp-krb/backup/krb5.conf ]; then
+  replaced=1
 fi
 cat > /etc/krb5.conf <<'CONF'
 [libdefaults]
@@ -308,6 +452,7 @@ python3 -c 'import gssapi' >/dev/null 2>&1 || { echo 'python3-gssapi missing (th
 # but every HTTPS client does, and without it internal sites fail with the
 # misleading 'self-signed certificate in chain'. Non-fatal: ssh must still work
 # on a workstation that cannot reach the CA endpoint.
+ca_new=0
 ca_step() {
   [ -f /usr/local/share/ca-certificates/realm-ca.crt ] && { echo CA-OK; return 0; }
   curl -fsS --max-time 15 -o /tmp/realm-ca.crt http://$Kdc/ipa/config/ca.crt || { echo CA-SKIP; return 0; }
@@ -337,19 +482,91 @@ ca_step() {
     return 1
   fi
   install -m 0644 /tmp/realm-ca.crt /usr/local/share/ca-certificates/realm-ca.crt
+  ca_new=1
   update-ca-certificates >/dev/null 2>&1 && echo CA-OK || echo CA-SKIP
 }
 ca_step || exit 1
+# Record what this run changed, into the WSL-side manifest that uninstall.sh
+# reads. Same merge rules as install-bridge.sh's merge_manifest; duplicated
+# here because this step runs before that script has been fetched, and on an
+# SSH-only workstation it never is. Non-fatal: a run without a manifest still
+# works today, it just cannot be cleanly uninstalled, which the caller warns
+# about on the marker.
+REPLACED="`$replaced" CA_NEW="`$ca_new" OPTDIR_NEW="`$optdir_new" \
+INSTALLED="`$need" PRESENT="`$present" python3 - <<'PYMANIFEST' || echo MANIFEST-SKIP
+import json, os
+path = '/opt/mcp-krb/install-manifest.json'
+env = os.environ
+frag = {
+    'written_by': 'setup.ps1',
+    'created': [],
+    'created_dirs': ['/opt/mcp-krb'] if env.get('OPTDIR_NEW') == '1' else [],
+    'packages_installed': env.get('INSTALLED', '').split(),
+    'packages_already_present': env.get('PRESENT', '').split(),
+    'replaced': {},
+    'prior_values': {},
+}
+if env.get('REPLACED') == '1':
+    frag['replaced']['/etc/krb5.conf'] = '/opt/mcp-krb/backup/krb5.conf'
+else:
+    frag['created'].append('/etc/krb5.conf')
+if env.get('CA_NEW') == '1':
+    frag['created'].append('/usr/local/share/ca-certificates/realm-ca.crt')
+doc = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except ValueError:
+        raise SystemExit('manifest: refusing to overwrite a manifest that does not parse')
+doc.setdefault('manifest_version', 1)
+doc['written_by'] = frag['written_by']
+for key in ('created', 'created_dirs'):
+    have = list(doc.get(key, []))
+    for item in frag[key]:
+        if item not in have:
+            have.append(item)
+    doc[key] = have
+already = list(doc.get('packages_already_present', []))
+installed = list(doc.get('packages_installed', []))
+for p in frag['packages_already_present']:
+    if p not in already and p not in installed:
+        already.append(p)
+for p in frag['packages_installed']:
+    if p not in installed and p not in already:
+        installed.append(p)
+doc['packages_already_present'] = already
+doc['packages_installed'] = installed
+for key in ('replaced', 'prior_values'):
+    have = dict(doc.get(key, {}))
+    for k, v in frag[key].items():
+        if k not in have:
+            have[k] = v
+    doc[key] = have
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(doc, f, indent=2, sort_keys=True)
+    f.write('\n')
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+PYMANIFEST
 echo OK
 "@
 $wslStep2 = @(Invoke-WslScript -Script $bash -AsRoot)
 if ($wslStep2 -notcontains 'OK') { throw 'WSL Kerberos provisioning failed' }
+$provisioned = @($wslStep2 | Where-Object { $_ -like 'DISTRO=*' })
+if ($provisioned.Count -gt 0 -and $provisioned[0].Substring(7).Trim()) {
+    $Manifest.wsl_distro = $provisioned[0].Substring(7).Trim()
+}
 Say 'WSL: krb5-user + python3-gssapi installed, /etc/krb5.conf written (renewable, private ccache)'
 if ($wslStep2 -contains 'CA-UNPINNED') {
     Warn 'realm CA NOT installed: this copy of the script carries no pinned hash.'
     Warn 'Pass -CaSha256 <sha256sum of /etc/ipa/ca.crt, taken from any enrolled host>.'
 } elseif ($wslStep2 -contains 'CA-SKIP') {
     Warn "realm CA endpoint unreachable (http://$Kdc/ipa/config/ca.crt). SSH works; HTTPS to internal hosts will not until this is installed."
+}
+if ($wslStep2 -contains 'MANIFEST-SKIP') {
+    Warn 'WSL: the install manifest could not be updated - uninstall will not know what this run changed inside WSL.'
 }
 
 # --- 3. ssh_config inside WSL, in a sentinel-delimited managed block ---------
@@ -379,7 +596,9 @@ Say "WSL: ~/.ssh/config managed block for *.$Domain (user $IpaUser)"
 # safely with no cmd layer. The .bat exists only because VS Code's
 # remote.SSH.path needs a file on disk; it is not for interactive use.
 $binDir = "$env:USERPROFILE\bin"
+$binDirExisted = Test-Path $binDir
 New-Item -ItemType Directory -Force $binDir | Out-Null
+if (-not $binDirExisted) { $Manifest.created_dirs += $binDir }
 $wrapper = Join-Path $binDir 'ssh-dispatch.bat'
 # remote.SSH.path is global in VS Code, so this wrapper must serve both worlds:
 # realm hosts go to WSL (Kerberos), everything else falls through to the native
@@ -401,6 +620,7 @@ if not "!STRIPPED!"=="!ARGS!" (
     endlocal & "%SystemRoot%\System32\OpenSSH\ssh.exe" %*
 )
 "@
+$Manifest.created += $wrapper
 Remove-Item (Join-Path $binDir 'ssh-wsl.bat') -ErrorAction SilentlyContinue   # old name
 
 # $PROFILE is populated by the host, so it is empty in runspaces that never load
@@ -415,7 +635,10 @@ if ([string]::IsNullOrWhiteSpace($profilePath)) {
     $profilePath = Join-Path (Join-Path $docs $dir) 'profile.ps1'
 }
 New-Item -ItemType Directory -Force (Split-Path $profilePath -Parent) | Out-Null
-if (-not (Test-Path $profilePath)) { New-Item -ItemType File $profilePath | Out-Null }
+if (-not (Test-Path $profilePath)) {
+    New-Item -ItemType File $profilePath | Out-Null
+    $Manifest.created += $profilePath
+}
 # @() on both sides: a single-line file makes -notmatch return a scalar boolean,
 # which previously got written back over the profile as the text "False".
 #
@@ -520,9 +743,16 @@ if ($SkipVSCode) {
             Write-Host '    "remote.SSH.enableDynamicForwarding": false' -ForegroundColor Cyan
             continue
         }
+        # What each key held before this run touches it, read off the original
+        # text. Recorded only for keys this run actually changes: a key already
+        # at the desired value was set by an earlier run, and its true prior,
+        # if any, is already in the manifest under first-record-wins.
+        $priors = @{}
         $text = $orig
         foreach ($k in $desired.Keys) {
             $val = if ($desired[$k] -is [bool]) { $desired[$k].ToString().ToLower() } else { $desired[$k] | ConvertTo-Json }
+            $had = Get-JsoncScalarRaw -Text $orig -Key $k
+            if ($had -ne $val) { $priors[$k] = $had }
             $new = Set-JsoncKey -Text $text -Key $k -JsonValue $val
             if ($null -eq $new) { $text = $null; break }
             $text = $new
@@ -536,6 +766,7 @@ if ($SkipVSCode) {
         } else {
             Copy-Item $path "$path.bak" -Force -ErrorAction SilentlyContinue
             [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))
+            if ($priors.Count -gt 0) { $Manifest.prior_values[$path] = $priors }
             Say "${name}: settings updated (comments preserved; backup at settings.json.bak)"
         }
     }
@@ -639,7 +870,7 @@ echo OK
     $reported = @($mcpOut | Where-Object { $_ -like 'DISTRO=*' })
     if ($reported.Count -gt 0) {
         $named = $reported[0].Substring(7).Trim()
-        if ($named) { $distro = $named }
+        if ($named) { $distro = $named; $Manifest.wsl_distro = $named }
     }
     if ($mcpOut -contains 'CA-MISSING') {
         # Checked before the catch-all below so the operator gets the actionable
@@ -714,6 +945,10 @@ function Register-McpInUserConfig {
     if (Test-Path $cfg) { Copy-Item $cfg "$cfg.bak" -Force -ErrorAction SilentlyContinue }
     # No BOM: Out-File -Encoding utf8 emits one on 5.1 and JSON readers choke.
     [IO.File]::WriteAllText($cfg, $out, (New-Object Text.UTF8Encoding($false)))
+    # Only a registration this run created is recorded: an entry that was
+    # already there (either branch above) may be hand-tuned and is not this
+    # kit's to remove at uninstall.
+    $Manifest.claude_registration = $Name
     return $true
 }
 
@@ -748,6 +983,7 @@ if ($mcpDone) {
                 & claude mcp add-json --scope user internal-tools $mcpJson 2>&1 | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Say 'MCP: registered internal-tools for your user (via wsl.exe)'
+                    $Manifest.claude_registration = 'internal-tools'
                     $registered = $true
                 } else {
                     Warn 'MCP: `claude mcp add-json` failed - register manually:'
@@ -768,6 +1004,16 @@ if ($mcpDone) {
     if (-not $registered) {
         Write-Host "    claude mcp add-json --scope user internal-tools '$mcpJson'" -ForegroundColor Cyan
     }
+}
+
+# Written last, once, so the manifest only ever describes a run that
+# completed; a throw anywhere above leaves the previous manifest as it was.
+$manifestPath = Join-Path $binDir 'mcp-krb-manifest.json'
+try {
+    Merge-InstallManifest -Path $manifestPath -Fragment $Manifest
+    Say "install manifest: $manifestPath"
+} catch {
+    Warn "could not write $manifestPath - uninstall will not know what this run changed. $_"
 }
 
 Write-Host ''
