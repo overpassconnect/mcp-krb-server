@@ -573,12 +573,18 @@ the extension breaking. Run `wsl kinit -R`.
 
 ## macOS (manual)
 
-There is no macOS script. Linux gets a real FreeIPA enrolment and Windows gets
-`setup.ps1`; a Mac gets neither. macOS is a hand-written faux-enrolment: it
-configures the Kerberos client only, does not join the machine to the realm, and is
-not idempotent. It was worked out and proven on a live Mac. The full copy-paste
-procedure is the macOS section of the provisioning page the MCP host serves at
-`/client/`; the steps below are the shape and the one trap.
+`setup-macos.sh` is the macOS counterpart to `setup.sh` and `setup.ps1`, with one
+structural difference: a Mac never joins the realm. There is no
+`ipa-client-install` for it, so the script configures the Kerberos client, SSH, the
+optional realm CA and the MCP bridge, and stops there. The realm never learns the
+machine exists, which is why macOS genuinely leaves FreeIPA untouched where Linux
+does not.
+
+It is idempotent, writes an install manifest so `uninstall.sh` can reverse it, and
+takes `--dry-run` to print the plan without changing anything. The provisioning page
+the MCP host serves at `/client/` carries both the one-line invocation and the same
+steps by hand, for anyone who would rather not run a downloaded script. The rest of
+this section is the shape and the one trap.
 
 The trap, because it costs an afternoon otherwise: the `krb5.conf` KDC line must be
 
