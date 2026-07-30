@@ -109,7 +109,11 @@ the realm CA and never pipe a download to a shell.
 macOS has no script. It is a short, documented manual Kerberos-client setup
 (see [`client/README.md`](client/README.md) and the provisioning page the MCP host
 serves), separate because macOS ships Heimdal rather than MIT krb5 and needs a
-specific `kdc = tcp/...` line that a naive config gets wrong.
+specific `kdc = tcp/...` line that a naive config gets wrong. Both halves of the
+kit apply there: SSH via GSSAPI is proven, and the MCP bridge has a documented
+path too (`pip install gssapi`; the wheel links the system Heimdal, so the bridge
+reads the same ticket `kinit` writes), verified by linkage though not yet
+exercised end to end from a Mac.
 
 Shared team workspace: once users reach a host with their own Kerberos identity, a
 directory the whole team can edit needs no extra machinery. FreeIPA already puts

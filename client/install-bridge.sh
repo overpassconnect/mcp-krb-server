@@ -57,6 +57,92 @@ DEST="/opt/mcp-krb"
 MANAGED_FILE="/etc/claude-code/managed-mcp.json"
 
 BRIDGE="mcp-krb-bridge.py"
+MANIFEST="$DEST/install-manifest.json"
+
+# --- install manifest ---------------------------------------------------------
+# An uninstaller with no record of the prior state can only leave things behind
+# or delete things it did not install, so every installer records what it
+# actually changed. The record is a merge, not an overwrite: a re-run adds to
+# it, and the first record of a replaced file or a prior value always wins,
+# because only the first run saw the machine as the user had it.
+#
+# merge_manifest <path> <json-fragment> folds a fragment into the manifest at
+# <path>, creating it if absent. Rules, each load-bearing for uninstall:
+#   - created / created_dirs merge as sets: only what an installer created may
+#     ever be removed.
+#   - a package first recorded as already-present is never moved to installed,
+#     so uninstall can never remove a package the machine already had.
+#   - replaced and prior_values keep the first record: the backup of the
+#     pristine original must not be re-pointed at a later copy.
+# A manifest that exists but does not parse is refused, never overwritten: a
+# corrupt record is still evidence, and silently replacing it would turn the
+# next uninstall into guesswork.
+#
+# Callable standalone as `install-bridge.sh --manifest-merge <path> <fragment>`
+# so setup.sh (and the tests) reuse this one implementation instead of growing
+# their own with drifting rules. Standalone mode runs unprivileged; the install
+# flow below sets MERGE_SUDO because $DEST is root-owned.
+MERGE_SUDO=""
+merge_manifest() {
+    $MERGE_SUDO python3 - "$1" "$2" <<'PY'
+import json, os, sys
+
+path, frag_text = sys.argv[1], sys.argv[2]
+try:
+    frag = json.loads(frag_text)
+except ValueError as exc:
+    sys.stderr.write('manifest: fragment is not JSON: %s\n' % exc)
+    sys.exit(1)
+doc = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except ValueError as exc:
+        sys.stderr.write('manifest: %s exists but is not JSON (%s) - '
+                         'refusing to overwrite it\n' % (path, exc))
+        sys.exit(1)
+doc.setdefault('manifest_version', 1)
+if 'written_by' in frag:
+    doc['written_by'] = frag['written_by']
+for key in ('created', 'created_dirs'):
+    have = list(doc.get(key, []))
+    for item in frag.get(key, []):
+        if item not in have:
+            have.append(item)
+    doc[key] = have
+# Only packages_installed may ever be removed by uninstall, so an entry moves
+# between the two lists in one direction only: already-present never becomes
+# installed. The reverse guard keeps a package this kit installed on run one
+# from being re-classified as already-present by run two, which would strand it.
+already = list(doc.get('packages_already_present', []))
+installed = list(doc.get('packages_installed', []))
+for p in frag.get('packages_already_present', []):
+    if p not in already and p not in installed:
+        already.append(p)
+for p in frag.get('packages_installed', []):
+    if p not in installed and p not in already:
+        installed.append(p)
+doc['packages_already_present'] = already
+doc['packages_installed'] = installed
+# First record wins: the backup taken before the first clobber is the pristine
+# original, and the value seen before the first edit is the user's own. A JSON
+# null in prior_values means the key was absent, so uninstall deletes it; a
+# string is the user's value, restored verbatim.
+for key in ('replaced', 'prior_values'):
+    have = dict(doc.get(key, {}))
+    for k, v in frag.get(key, {}).items():
+        if k not in have:
+            have[k] = v
+    doc[key] = have
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(doc, f, indent=2, sort_keys=True)
+    f.write('\n')
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+PY
+}
 
 MANAGED=0
 while [ $# -gt 0 ]; do
@@ -72,6 +158,14 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo "ERROR: --mcp-url needs a value" >&2; exit 2; }
             MCP_URL="$2"; shift ;;
         --mcp-url=*) MCP_URL="${1#--mcp-url=}" ;;
+        --manifest-merge)
+            # Standalone entry point for merge_manifest; used by setup.sh after
+            # enrolment and by the unit tests. Exits here, before the
+            # --base-url/--mcp-url requirements, because merging a manifest
+            # downloads nothing and talks to nothing.
+            [ $# -ge 3 ] || { echo "ERROR: --manifest-merge needs <manifest-path> <json-fragment>" >&2; exit 2; }
+            merge_manifest "$2" "$3"
+            exit $? ;;
         -h|--help)
             echo "usage: sh install-bridge.sh --base-url URL --mcp-url URL [--managed]"
             echo ""
@@ -189,7 +283,9 @@ fetch_retry "$BRIDGE" "$tmp/$BRIDGE" || {
 
 # Install atomically: `install` writes via a temp file and renames, so a
 # concurrent exec never sees a half-written bridge, and re-running just replaces
-# it.
+# it. Whether $DEST existed is checked first because only a directory this run
+# created may be recorded as removable in the manifest.
+DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
 $SUDO install -m 0755 "$tmp/$BRIDGE" "$DEST/$BRIDGE"
 python3 -c 'import gssapi' 2>/dev/null || \
@@ -197,6 +293,8 @@ python3 -c 'import gssapi' 2>/dev/null || \
 
 REG='{"mcpServers":{"internal-tools":{"type":"stdio","command":"/usr/bin/python3","args":["'"$DEST/$BRIDGE"'","'"$MCP_URL"'"]}}}'
 
+MANAGED_WROTE=0
+ETC_EXISTED=0; [ -d /etc/claude-code ] && ETC_EXISTED=1
 if [ "$MANAGED" = 1 ]; then
     if [ -f "$MANAGED_FILE" ] && grep -q '"internal-tools"' "$MANAGED_FILE"; then
         echo "OK: $MANAGED_FILE already registers internal-tools - left untouched."
@@ -206,6 +304,7 @@ if [ "$MANAGED" = 1 ]; then
         $SUDO mkdir -p /etc/claude-code
         printf '%s\n' "$REG" | $SUDO tee "$MANAGED_FILE" >/dev/null
         echo "Registered internal-tools machine-wide in $MANAGED_FILE."
+        MANAGED_WROTE=1
     fi
 else
     echo ""
@@ -213,3 +312,22 @@ else
     echo "  claude mcp add internal-tools -- /usr/bin/python3 $DEST/$BRIDGE $MCP_URL"
     echo "or re-run with --managed to register it machine-wide in $MANAGED_FILE."
 fi
+
+# Record what this run changed, as the last step of a successful install. Every
+# path below is script-literal, which is what makes building the JSON by
+# concatenation safe. Non-fatal on failure, but loud: an install without a
+# manifest still works today and cannot be cleanly uninstalled tomorrow.
+FRAG_CREATED="\"$DEST/$BRIDGE\""
+[ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
+FRAG_DIRS=""
+[ "$DEST_EXISTED" = 0 ] && FRAG_DIRS="\"$DEST\""
+if [ "$MANAGED_WROTE" = 1 ] && [ "$ETC_EXISTED" = 0 ]; then
+    [ -n "$FRAG_DIRS" ] && FRAG_DIRS="$FRAG_DIRS, "
+    FRAG_DIRS="$FRAG_DIRS\"/etc/claude-code\""
+fi
+MERGE_SUDO="$SUDO"
+merge_manifest "$MANIFEST" '{
+  "written_by": "install-bridge.sh",
+  "created": ['"$FRAG_CREATED"'],
+  "created_dirs": ['"$FRAG_DIRS"']
+}' || echo "WARNING: could not update $MANIFEST - uninstall.sh will not know what this run changed." >&2

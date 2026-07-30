@@ -597,7 +597,31 @@ a `krb5.conf` with `[realms]`/`[domain_realm]`, `~/.ssh/config` with
 `GSSAPIAuthentication yes` and `GSSAPIDelegateCredentials no` ([CL1]), then `kinit`.
 Use `klist -v` to see flags, not `klist -f` (the MIT spelling). The realm CA is
 needed only for HTTPS to the MCP host, not for `kinit` or `ssh`, and is verified out
-of band by SHA-256. The MCP bridge has no macOS path yet; SSH via GSSAPI does work.
+of band by SHA-256. SSH via GSSAPI works.
+
+The MCP bridge runs on macOS too. The packaging problem that once blocked it no
+longer exists: python-gssapi has shipped macOS wheels for x86_64 and arm64 since
+1.7.2, so `pip install gssapi` needs no compiler and no Xcode CLT, and the bridge
+itself calls nothing platform-specific. The provisioning page carries the steps
+(a per-user venv under `~/Library/Application Support/mcp-krb/`, then the same
+`claude mcp add` registration the Linux installer prints).
+
+Why it works, recorded so nobody re-litigates it in a year: the worry worth
+checking was which Kerberos the wheel resolves. A bundled MIT krb5 would look for
+the ticket in `FILE:/tmp/krb5cc_<uid>` and report no credentials cache while
+`klist` showed a perfectly valid one sitting in the system's `KCM:` (Ventura and
+earlier) or `API:` (Sonoma and later) cache. It does not: both published wheels
+ship no `.dylibs/` directory, and every extension module carries exactly one
+`LC_LOAD_DYLIB`, `/System/Library/Frameworks/GSS.framework/Versions/A/GSS`. That
+is the system Heimdal, the same library behind `kinit` and `klist`, so the bridge
+and the user's ticket share one credential cache and the Sonoma ccache-default
+change is invisible to it.
+
+What that linkage evidence is not: a smoke test. This path has not been exercised
+end to end against the MCP server from a Mac; the one untested step is a Heimdal
+SPNEGO initiator against the server's MIT acceptor, the same pairing every Mac
+that SSHes into a FreeIPA realm already exercises daily. Expected to work, not
+yet earned the word "supported".
 
 ## The bridge itself
 
@@ -711,33 +735,43 @@ Docker Desktop.
 
 ## Rollback
 
-Nothing changes on the servers or in FreeIPA.
+Two scripts, both driven by the install manifest the installers write, and both
+defaulting to a dry run: they print the plan and change nothing until asked.
+The scripts are the reference for what is removed and restored; every removal
+is justified by a manifest entry saying the installer created it, and every
+replaced file or settings key goes back to the recorded prior state rather than
+being deleted.
 
-Linux:
+Linux, and inside WSL:
 
 ```sh
-sudo rm -rf /opt/mcp-krb
-sudo rm -f /etc/claude-code/managed-mcp.json   # only if --managed was used
-kdestroy
+sudo sh uninstall.sh            # print the plan
+sudo sh uninstall.sh --yes      # apply it
 ```
 
-Windows:
+`--keep-packages` leaves apt/dnf packages alone even where the kit installed
+them; `--managed` also removes the machine-wide `/etc/claude-code`
+registration, which affects every user on the machine and is therefore opt-in.
+
+Windows, which also cleans the WSL side through the distro the installer
+recorded in the manifest, never the default distro:
 
 ```powershell
-Remove-Item "$env:USERPROFILE\bin\ssh-dispatch.bat"
-# delete the wslssh line from $PROFILE.CurrentUserAllHosts
-# delete the sentinel block from WSL's ~/.ssh/config
-wsl kdestroy
+.\uninstall.ps1                 # print the plan
+.\uninstall.ps1 -Yes            # apply it
 ```
 
-If `-McpUrl` was used, also:
+What the scripts deliberately do not do, one line each:
 
-```powershell
-claude mcp remove internal-tools
-wsl -u root -e rm -rf /opt/mcp-krb
-```
+- Un-enrol from FreeIPA. A Linux workstation's host entry and host keytab stay
+  on the IPA server; `sudo ipa-client-install --uninstall` is the separate,
+  deliberate act that changes that. Windows and macOS never enrol, so the realm
+  holds nothing of theirs.
+- Unregister the WSL distro. That deletes an entire Linux filesystem;
+  `wsl --unregister <distro>` is printed, never run.
+- Delete `.bak` files. `settings.json.bak` and `.claude.json.bak` may predate
+  this kit, so they are reported by path and left alone.
 
-`/opt/mcp-krb` holds only the bridge, and it holds no credential.
-
-Un-enrolling a Linux machine from the realm is a separate operation and this kit
-does not do it: `sudo ipa-client-install --uninstall`.
+A workstation provisioned before the manifest existed has nothing recorded, so
+both scripts refuse to guess: they print what a manifest would have told them
+and exit non-zero, leaving the reversal to you.

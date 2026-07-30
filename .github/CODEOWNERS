@@ -21,3 +21,10 @@
 /server/delegation.py      @stamstergios @overpassconnect
 /server/mcp_server.py      @stamstergios @overpassconnect
 /SECURITY.md               @stamstergios @overpassconnect
+
+# The uninstallers remove from CA trust stores and rewrite user configuration,
+# and JsoncEdit parses those files by hand; a change to any of them alters what
+# runs with the user's (or root's) authority on every workstation.
+/client/uninstall.sh       @stamstergios @overpassconnect
+/client/uninstall.ps1      @stamstergios @overpassconnect
+/client/JsoncEdit.ps1      @stamstergios @overpassconnect

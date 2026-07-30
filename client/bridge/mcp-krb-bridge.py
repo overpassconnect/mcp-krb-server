@@ -12,6 +12,9 @@ Usage:
 
 Dependencies:
     Linux:   python3 + python3-gssapi (both already present on ipa-client machines)
+    macOS:   python3 + `pip install gssapi` (the wheel links the system
+             GSS.framework, the same Heimdal behind kinit, so both read one
+             credential cache; nothing is bundled)
     Windows: python3 + `pip install pyspnego` (uses the native SSPI of the login session)
 
 Environment:
@@ -99,7 +102,8 @@ else:
                 return 'Negotiate ' + base64.b64encode(ctx.step()).decode()
 
         except ImportError:
-            log('missing Kerberos support: install python3-gssapi (Linux) '
+            log('missing Kerberos support: install python3-gssapi (Linux), '
+                'run `pip install gssapi` (macOS), '
                 'or `pip install pyspnego` (Windows)')
             sys.exit(2)
 

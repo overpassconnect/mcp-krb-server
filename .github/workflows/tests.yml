@@ -31,3 +31,21 @@ jobs:
       - name: unit tests
         shell: bash
         run: sh tests/run-tests.sh
+
+  # The Pester tests target Windows PowerShell 5.1, the runtime the client
+  # scripts actually execute under, so `shell: powershell`, not pwsh. This job
+  # installs Pester 5 explicitly (the runner image ships 3.4 inbox), which is
+  # what keeps run-tests.sh's local "no Pester" skip from quietly becoming the
+  # only outcome anywhere.
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install Pester 5
+        shell: powershell
+        run: Install-Module Pester -Force -SkipPublisherCheck -Scope CurrentUser -MinimumVersion 5.0
+      - name: pester tests
+        shell: powershell
+        run: |
+          $r = Invoke-Pester -Path tests/powershell -PassThru -Output Detailed
+          if ($r.FailedCount -gt 0 -or $r.TotalCount -eq 0) { exit 1 }

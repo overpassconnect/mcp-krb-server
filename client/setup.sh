@@ -130,8 +130,15 @@ SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
 # --skip-mcp to stop after this phase. Ends by checking that the kernel
 # hostname matches the enrolled FQDN, because inbound GSSAPI depends on it.
 # ============================================================================
+# Which package (if any) this run installs is recorded for the manifest at the
+# end of phase 2. Only a package this script installed may ever be removed by
+# uninstall.sh; a machine that already had the IPA client keeps it, so nothing
+# is recorded for that case and the package can never appear in a removal plan.
+IPA_PKG_INSTALLED=""
 if ! command -v ipa-client-install >/dev/null 2>&1; then
-    if command -v dnf >/dev/null 2>&1; then $SUDO dnf -y install ipa-client || $SUDO dnf -y install freeipa-client
+    if command -v dnf >/dev/null 2>&1; then
+        if $SUDO dnf -y install ipa-client; then IPA_PKG_INSTALLED="ipa-client"
+        else $SUDO dnf -y install freeipa-client; IPA_PKG_INSTALLED="freeipa-client"; fi
     elif command -v apt-get >/dev/null 2>&1; then
         # A freshly imaged box has never refreshed its package lists, so the
         # install below fails with "Unable to locate package freeipa-client".
@@ -142,6 +149,7 @@ if ! command -v ipa-client-install >/dev/null 2>&1; then
         # realm and hangs an unattended run without DEBIAN_FRONTEND. Set via
         # `env` so it survives sudo's environment scrubbing.
         $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y install freeipa-client
+        IPA_PKG_INSTALLED="freeipa-client"
     else echo "ERROR: ipa-client-install not found and no known package manager." >&2; exit 1; fi
 fi
 
@@ -283,3 +291,15 @@ fetch_retry "$INSTALL_URL" "$installer" || fetch_failed "$INSTALL_URL"
 
 # Executed as root on TLS trust alone; nothing else checks these bytes.
 sh "$installer" --managed --base-url "$BASE_URL" --mcp-url "$MCP_URL"
+
+# install-bridge.sh has just written /opt/mcp-krb/install-manifest.json; fold
+# in the one thing only this script knows, the enrolment-time package install,
+# through the installer's own merge entry point so the merge rules live in one
+# place. An older published installer without --manifest-merge is not worth
+# failing an already-successful enrolment over: warn and move on, the cost is
+# an uninstall that leaves that package alone.
+if [ -n "$IPA_PKG_INSTALLED" ]; then
+    $SUDO sh "$installer" --manifest-merge /opt/mcp-krb/install-manifest.json \
+        '{"written_by": "setup.sh", "packages_installed": ["'"$IPA_PKG_INSTALLED"'"]}' \
+        || echo "WARNING: could not record $IPA_PKG_INSTALLED in the install manifest - uninstall.sh will leave that package alone." >&2
+fi
