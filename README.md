@@ -287,6 +287,46 @@ for outbound authentication, which raises what a stolen keytab is worth under [K
 Turning it on is a deliberate deployment decision. The shipped client does not
 delegate ([CL1]), and the full analysis is [D1] in [SECURITY.md](SECURITY.md).
 
+### Enabling it
+
+Three things have to line up, and the KDC is the only one this repository cannot
+arrange for you.
+
+First, authorise the delegation in FreeIPA, as a realm admin. It is two objects,
+not one: a *target* is a reusable list of services that may be delegated to, and
+a *rule* says which service may use that list.
+
+```sh
+ipa servicedelegationtarget-add mcp-targets
+ipa servicedelegationtarget-add-member mcp-targets \
+    --principals=HTTP/ci.example.internal@EXAMPLE.INTERNAL
+ipa servicedelegationrule-add mcp-delegation
+ipa servicedelegationrule-add-member mcp-delegation \
+    --principals=HTTP/mcp.example.internal@EXAMPLE.INTERNAL
+ipa servicedelegationrule-add-target mcp-delegation \
+    --servicedelegationtargets=mcp-targets
+```
+
+Repeat the flag for each value (`--principals=a --principals=b`). A
+comma-separated list is accepted and then silently adds nothing: `ipa` reports
+success with the rejects in a `failed` field most callers never read, and the
+first symptom is a runtime `KDC_ERR_BADOPTION` that `_explain()` cannot
+distinguish from a missing rule.
+
+Verify with `ipa servicedelegationrule-show mcp-delegation`. A host principal
+cannot read these objects, so checking from the MCP host itself returns an empty
+result rather than an error.
+
+Second, callers need forwardable tickets. Without protocol transition the KDC
+hard-requires it. On Windows that is `setup.ps1 -Forwardable`; elsewhere it is
+`forwardable = true` in `krb5.conf`. A non-forwardable caller is refused with the
+same opaque error as a missing rule.
+
+Third, turn it on in `site.env`: `MCP_DELEGATION=1` plus a
+`MCP_DELEGATION_TARGETS` row per forwarding tool. `run.sh` validates the grammar,
+refuses a target naming a tool that does not call `forward_header()`, and warns
+that the keytab is now usable outbound.
+
 ## Configuration
 
 `server/install/site.env.example` is the single source of site values (domain,

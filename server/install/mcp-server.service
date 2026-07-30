@@ -57,6 +57,12 @@ RuntimeDirectoryMode=0755
 # own target allowlist is a backstop that a caller who forwards a TGT removes.
 # Read SECURITY.md [D1] before adding a row. Root-owned on purpose.
 # Environment=MCP_DELEGATION_TARGETS=
+# A deployment's own tools, loaded at startup from a file this repository does
+# not carry (they name real internal hosts). run.sh writes this from
+# MCP_SITE_TOOLS in site.env. Keep the file OUTSIDE the deployed code directory,
+# which run.sh converges, and root-owned: it becomes code inside this process,
+# so anything that can write it can run as this service.
+# Environment=MCP_SITE_TOOLS=/etc/mcp-server/site_tools.py
 # Environment=MCP_AUTHZ_EDITOR=1
 # Environment=MCP_POLICY_ADMINS=alice@EXAMPLE.INTERNAL,bob@EXAMPLE.INTERNAL
 # Environment=MCP_POLICY_FILE=/var/lib/mcp-server/tool-groups.json

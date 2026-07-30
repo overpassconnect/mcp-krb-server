@@ -914,10 +914,18 @@ if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
         # A target for a tool that cannot forward is a live grant sitting unused,
         # waiting for some future function to be given that name. Refuse it while
         # it is still a typo rather than an inheritance.
-        grep -q "forward_header(ctx, '$_tool')" "$CODEDIR/mcp_server.py" \
+        # Look in the site tools file too. A deployment's own forwarding tools
+        # live there rather than in mcp_server.py, and checking only the shipped
+        # file would refuse every real target a site ever adds.
+        _found=0
+        grep -q "forward_header(ctx, '$_tool')" "$CODEDIR/mcp_server.py" && _found=1
+        [ "$_found" = 0 ] && [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ] \
+            && grep -q "forward_header(ctx, '$_tool')" "$MCP_SITE_TOOLS" && _found=1
+        [ "$_found" = 1 ] \
             || die "MCP_DELEGATION_TARGETS grants '$_tool' a downstream target, but no
-  tool by that name calls forward_header() in mcp_server.py. Either the name is a
-  typo, or the grant is dead config. Refusing to install an unused grant."
+  tool by that name calls forward_header() in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}.
+  Either the name is a typo, or the grant is dead config. Refusing to install an
+  unused grant."
     done
     # '|' as the sed delimiter, not '#': the pattern starts with a literal '#'
     # (the commented line being filled in), which would close the expression.
@@ -928,6 +936,51 @@ if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
   '# Environment=MCP_DELEGATION_TARGETS=' line to fill in. Refusing to install a
   unit whose forwarding tools would all fail closed while site.env says they work."
     say "delegation targets: $MCP_DELEGATION_TARGETS"
+fi
+
+# A deployment's own tools. The file is not carried by this repository and not
+# deployed by this script: it names internal hosts, and it must live outside
+# $CODEDIR because the step above converges that directory on the repo's file
+# set and would delete it.
+#
+# Checked here rather than left to the server, for the same reason as the
+# targets: a missing file caught now is a line on this terminal, caught at
+# import it is a unit that will not start.
+if [ -n "${MCP_SITE_TOOLS:-}" ]; then
+    case "$MCP_SITE_TOOLS" in
+        /*) ;;
+        *) die "MCP_SITE_TOOLS must be an absolute path, got '$MCP_SITE_TOOLS'." ;;
+    esac
+    case "$MCP_SITE_TOOLS" in
+        "$CODEDIR"/*) die "MCP_SITE_TOOLS points inside $CODEDIR, which this script
+  converges on the repository's file set. The file would be deleted on the next
+  install. Put it somewhere this script does not manage, e.g. /etc/mcp-server/." ;;
+    esac
+    [ -f "$MCP_SITE_TOOLS" ] || die "MCP_SITE_TOOLS names $MCP_SITE_TOOLS, which does not exist.
+  Refusing to install a unit that would fail at startup."
+    # It becomes code inside the service, so anything that can write it can run
+    # as the service, which holds the keytab. Same standard as $CODEDIR.
+    _st_owner="$(stat -c '%U' "$MCP_SITE_TOOLS")"
+    [ "$_st_owner" = root ] || die "MCP_SITE_TOOLS ($MCP_SITE_TOOLS) is owned by
+  '$_st_owner', not root. It is imported by the service, so a non-root owner means
+  that account can execute code as the service. Install it root-owned 0644."
+    case "$(stat -c '%a' "$MCP_SITE_TOOLS")" in
+        *[2367])
+            die "MCP_SITE_TOOLS ($MCP_SITE_TOOLS) is group- or world-writable.
+  It is imported by the service; make it 0644 root-owned." ;;
+    esac
+    # /usr/bin/python3, not the venv: preflight already proved this one exists
+    # and is >= 3.11, and a syntax check needs no third-party imports.
+    /usr/bin/python3 -c "import ast,io,sys; ast.parse(io.open(sys.argv[1],encoding='utf-8').read())" \
+        "$MCP_SITE_TOOLS" 2>/dev/null \
+        || die "MCP_SITE_TOOLS ($MCP_SITE_TOOLS) is not valid Python.
+  It would stop the service at startup. Fix it before installing."
+    sed -i "s|^# *Environment=MCP_SITE_TOOLS=.*|Environment=MCP_SITE_TOOLS=$MCP_SITE_TOOLS|" \
+        "$RENDER/mcp-server.service"
+    grep -q '^Environment=MCP_SITE_TOOLS=' "$RENDER/mcp-server.service" \
+        || die "MCP_SITE_TOOLS is set but the unit template has no
+  '# Environment=MCP_SITE_TOOLS=' line to fill in."
+    say "site tools: $MCP_SITE_TOOLS"
 fi
 
 assert_rendered() {
@@ -1474,6 +1527,26 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
         mkdir -p "$_bd"
         for _f in $BUNDLE_FILES; do
             install -m 0644 "$_cl/$_f" "$_bd/$(basename "$_f")"
+        done
+        # Converge, do not merely add. This step used to only install, so any
+        # file ever published stayed published: after install.sh was renamed to
+        # install-bridge.sh, hosts went on serving BOTH, and the stale one was a
+        # root-installing script nobody intended to offer. That is the opposite
+        # of what [SC1] claims, where the whole assurance is that the publisher
+        # controls exactly which bytes run as root on a workstation.
+        #
+        # config.js is generated by write_config() right after this, so it is
+        # kept rather than pruned.
+        for _p in "$_bd"/*; do
+            [ -e "$_p" ] || continue
+            _n="$(basename "$_p")"
+            [ "$_n" = config.js ] && continue
+            for _f in $BUNDLE_FILES; do
+                [ "$_n" = "$(basename "$_f")" ] && { _n=""; break; }
+            done
+            [ -n "$_n" ] || continue
+            say "pruning stale published file: $_n"
+            rm -f "$_p"
         done
     }
 
