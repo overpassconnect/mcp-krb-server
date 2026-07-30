@@ -346,9 +346,38 @@ sudo security add-trusted-cert -d -r trustRoot \
     <p class="note">That fetch is plain HTTP, so the hash comparison is the entire check. If
     it does not match, stop and talk to IT rather than installing it anyway.</p>
 
-    <p class="note">The MCP bridge is not part of this. It is installed on Linux by
-    <code>install-bridge.sh</code> and on Windows by <code>setup.ps1 -McpUrl</code>; there is no
-    macOS path for it yet. Ask IT if you need one on a Mac.</p>
+    <h3>Optional: the MCP bridge</h3>
+    <p class="note">Only if you have been asked to run it, and only after the realm CA step
+    above: the bridge speaks HTTPS to <code>__MCP_URL__</code>, and without the CA in the System
+    keychain that fails with an opaque certificate error. python-gssapi ships macOS wheels for
+    both Intel and Apple&nbsp;silicon, so this needs no compiler and no Xcode tools. The wheel
+    links the system GSS.framework, the same Heimdal behind <code>kinit</code>, so the bridge
+    reads the very ticket <code>klist</code> shows, on any macOS release.</p>
+<pre><code id="mac-mcp"># 5. MCP bridge. A per-user install: no sudo needed anywhere.
+mkdir -p "$HOME/Library/Application Support/mcp-krb"
+cd "$HOME/Library/Application Support/mcp-krb"
+python3 -m venv venv
+venv/bin/pip install --quiet gssapi
+curl --proto '=https' --tlsv1.2 -fsS -o mcp-krb-bridge.py __BASE__/mcp-krb-bridge.py
+
+# 6. Register it with Claude Code (kinit first, if you have not already).
+claude mcp add --scope user internal-tools -- \
+    "$HOME/Library/Application Support/mcp-krb/venv/bin/python3" \
+    "$HOME/Library/Application Support/mcp-krb/mcp-krb-bridge.py" \
+    __MCP_URL__</code></pre>
+
+    <p class="note">No <code>claude</code> CLI (desktop app only)? Add the same entry to
+    <code>~/.claude.json</code> under <code>mcpServers</code>, the shape shown in
+    <code>bridge/examples/mcp.json.example</code>, with the two paths above as the command and
+    first argument.</p>
+
+    <p class="note">Honesty about how proven this is: the wheel linkage has been verified (it
+    names the system GSS.framework and bundles nothing, so there is no second credential cache
+    to fall into), but this path has not yet been exercised end to end against the MCP server
+    from a Mac. The one genuinely untested step is a Heimdal SPNEGO initiator talking to the
+    server's MIT acceptor, the same pairing every Mac that SSHes into the realm already uses.
+    If a tool call fails where <code>klist</code> shows a valid ticket, tell IT: you are the
+    first to run this leg.</p>
   </section>
 
   <div class="rule"></div>
