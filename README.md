@@ -1,4 +1,4 @@
-# Reference Implementation of a Kerberised MCP Server and Remote VS Code/Claude Code integration for multi-OS FreeIPA Environments
+# Reference Implementation of a Kerberised MCP Server and Visual Studio Code Remote SSH - Claude Code integration for multi-OS FreeIPA Environments
 
 > Kerberos single sign-on for MCP against FreeIPA: authenticate with the ticket a developer already holds from logging in, authorize by directory group, and keep no passwords, API keys or per-developer secrets anywhere.
 
