@@ -39,7 +39,14 @@ import os
 import ssl
 import sys
 import threading
+import hashlib
 import http.client
+import re
+import signal
+import socket
+import struct
+import subprocess
+import tempfile
 from urllib.parse import urlsplit
 
 
@@ -311,15 +318,393 @@ class Bridge:
             pass
 
 
+
+# ---------------------------------------------------------------------------
+# Fetching a file, for content that must arrive byte-exact.
+#
+# An MCP tool cannot deliver such a file: every tool result is text bound for a
+# context window, and a model reproducing a source file will occasionally
+# reformat it or lose a trailing newline. Invisible in prose, a silent
+# corruption in code. So the bytes are fetched here and never reach the model.
+#
+# Both the URL and the destination arrive from model output, so every default
+# is restrictive. See SECURITY.md.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+_WINDOWS_PATH = re.compile(r'^[A-Za-z]:[\\/]')
+
+
+class FetchRefused(Exception):
+    """Policy said no. Exit 5, never write anything."""
+
+
+def _realm_suffix():
+    """Default host allowlist: the Kerberos realm, lowercased, as a domain."""
+    try:
+        with open('/etc/krb5.conf', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                if 'default_realm' in line and '=' in line:
+                    return '.' + line.split('=', 1)[1].strip().lower()
+    except OSError:
+        pass
+    return None
+
+
+def _check_url(url, host_suffix):
+    u = urlsplit(url)
+    if u.scheme != 'https':
+        raise FetchRefused('refusing %s:// - a Negotiate header in cleartext is '
+                           'observable. Use https://.' % (u.scheme or 'empty'))
+    if not u.hostname:
+        raise FetchRefused('no host in URL')
+    host = u.hostname.lower()
+    if host_suffix and not (host == host_suffix.lstrip('.') or host.endswith(host_suffix)):
+        raise FetchRefused('host %s is outside the allowed suffix %s. Pass '
+                           '--allow-host-suffix to widen it deliberately.' % (host, host_suffix))
+    return u
+
+
+def _check_dest(dest, force, allow_outside):
+    # A path shaped like C:\... reaches a WSL process as an ordinary relative
+    # filename, colon and backslashes included, and creates a file by that
+    # literal name while exiting 0. Refuse it rather than write nowhere.
+    #
+    # Only off native Windows, where such a path is simply correct. The hazard
+    # is the WSL boundary, not the syntax, and refusing it on Windows would
+    # reject every absolute path the platform has.
+    if os.name != 'nt' and _WINDOWS_PATH.match(dest):
+        raise FetchRefused('%s looks like a Windows path. Inside WSL that creates a '
+                           'file named literally that, in the current directory. Use a '
+                           'relative path, or translate it with `wslpath -u`.' % dest)
+    parent = os.path.dirname(os.path.abspath(dest)) or '.'
+    if not os.path.isdir(parent):
+        raise FetchRefused('no such directory: %s' % parent)
+    if not allow_outside:
+        cwd = os.path.realpath(os.getcwd())
+        real_parent = os.path.realpath(parent)
+        if real_parent != cwd and not real_parent.startswith(cwd + os.sep):
+            raise FetchRefused('%s is outside the working directory. Pass '
+                               '--allow-outside if that is deliberate.' % dest)
+    if os.path.islink(dest):
+        raise FetchRefused('%s is a symlink; refusing to write through it' % dest)
+    if os.path.isdir(dest):
+        raise FetchRefused('%s is a directory' % dest)
+    if os.path.exists(dest) and not force:
+        raise FetchRefused('%s exists; pass --force to overwrite' % dest)
+    return parent
+
+
+def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
+                  force=False, allow_outside=False, cafile=None,
+                  host_suffix=None, _write=True):
+    """SPNEGO GET of one URL, written to dest. Returns (bytes, hexdigest).
+
+    Writes through a temporary file in the destination directory and renames
+    only after the hash checks out, so "appears on disk" and "is complete" are
+    the same event."""
+    u = _check_url(url, host_suffix)
+    parent = _check_dest(dest, force, allow_outside) if _write else '.'
+
+    ctx = ssl.create_default_context(cafile=cafile)
+    conn = http.client.HTTPSConnection(u.hostname, u.port or 443, context=ctx)
+    path = u.path or '/'
+    if u.query:
+        path += '?' + u.query
+    headers = {'Accept': '*/*'}
+    auth = negotiate_header(u.hostname)
+    if auth:
+        headers['Authorization'] = auth
+    conn.request('GET', path, headers=headers)
+    resp = conn.getresponse()
+
+    # http.client does not follow redirects, and that immunity is deliberate:
+    # forwarding an Authorization header across a cross-origin redirect is a
+    # class with a long CVE history. Refuse rather than reimplement it.
+    if 300 <= resp.status < 400:
+        raise FetchRefused('refusing to follow a %d redirect to %r. Fetch the '
+                           'final URL directly.' % (resp.status, resp.getheader('Location')))
+    if resp.status != 200:
+        body = resp.read(512)
+        raise RuntimeError('HTTP %d from %s%s: %s' % (resp.status, u.hostname, path,
+                                                      body[:200].decode('utf-8', 'replace')))
+
+    digest = hashlib.sha256()
+    total = 0
+    tmp_fd = tmp_name = None
+    if _write:
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
+    try:
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise FetchRefused('response exceeds --max-bytes (%d)' % max_bytes)
+            digest.update(chunk)
+            if _write:
+                os.write(tmp_fd, chunk)
+        got = digest.hexdigest()
+        if sha256 and got != sha256.lower().replace(':', ''):
+            raise ValueError('sha256 mismatch\n  expected %s\n  got      %s'
+                             % (sha256, got))
+        if _write:
+            os.close(tmp_fd); tmp_fd = None
+            os.replace(tmp_name, dest)      # atomic on POSIX and Windows
+            tmp_name = None
+        return total, got
+    finally:
+        if tmp_fd is not None:
+            os.close(tmp_fd)
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Serving over a Unix socket, so a host with no ticket can use this one.
+#
+# The credential stays here. Only the channel is forwarded, by ssh -R. A socket
+# is not a secret: it cannot be copied off a machine or replayed tomorrow, and
+# it stops existing when the forward is torn down.
+# ---------------------------------------------------------------------------
+
+def _bind_socket(path):
+    """Bind a 0600 Unix socket, clearing a stale one only if nothing answers."""
+    if os.path.exists(path):
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(path)
+            probe.close()
+            sys.exit('mcp-krb-bridge: %s is already served by another process' % path)
+        except OSError:
+            os.unlink(path)          # nothing behind it; a corpse from last time
+        finally:
+            try:
+                probe.close()
+            except OSError:
+                pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    os.chmod(path, 0o600)            # before a single connection is accepted
+    srv.listen(8)
+    return srv
+
+
+def _peer_is_us(conn):
+    """0600 should already prevent a stranger. Check anyway, so a permissions
+    mistake fails closed instead of quietly opening the channel."""
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+        _pid, uid, _gid = struct.unpack('3i', creds)
+        return uid == os.getuid()
+    except (OSError, AttributeError):
+        return True                  # not Linux; the mode is the control
+
+
+def _serve(path, handler):
+    srv = _bind_socket(path)
+    log('listening on %s (0600)' % path)
+
+    def cleanup(*_a):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+    try:
+        while True:
+            conn, _ = srv.accept()
+            if not _peer_is_us(conn):
+                log('refused a connection from another uid')
+                conn.close()
+                continue
+            threading.Thread(target=handler, args=(conn,), daemon=True).start()
+    finally:
+        cleanup()
+
+
+def _pump(read, write, done):
+    try:
+        while True:
+            b = read()
+            if not b:
+                break
+            write(b)
+    except Exception:
+        pass
+    finally:
+        try:
+            done()
+        except Exception:
+            pass
+
+
+def serve_mcp_socket(path, url, cafile=None):
+    """Each connection gets its own bridge process, exactly as if it had been
+    spawned on stdio. The remote end just moves bytes."""
+    def handle(conn):
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), url]
+                             + (['--ca', cafile] if cafile else []),
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        threading.Thread(target=_pump,
+                         args=(lambda: conn.recv(65536),
+                               lambda b: (p.stdin.write(b), p.stdin.flush()),
+                               p.stdin.close), daemon=True).start()
+        _pump(lambda: p.stdout.read1(65536), conn.sendall, conn.close)
+        p.wait()
+    _serve(path, handle)
+
+
+def serve_fetch_socket(path, cafile=None, host_suffix=None,
+                       max_bytes=DEFAULT_MAX_BYTES):
+    """One request per connection: a JSON line naming a URL, then the body.
+
+    The restrictions are enforced HERE, on the machine holding the ticket. A
+    caller on the far end of a forwarded socket is exactly who they would be
+    protecting us from, so their copy of the rules would be worth nothing."""
+    def handle(conn):
+        try:
+            buf = b''
+            while b'\n' not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                if len(buf) > 8192:
+                    raise FetchRefused('request line too long')
+            req = json.loads(buf.split(b'\n', 1)[0].decode('utf-8'))
+            url = str(req.get('url', ''))[:2048]
+            log('fetch request: %s' % url)
+            total, got = fetch_to_file(url, dest=None, cafile=cafile,
+                                       host_suffix=host_suffix,
+                                       max_bytes=max_bytes, _write=False)
+            # Re-fetch straight to the socket now that policy has passed. Kept
+            # simple deliberately: two small GETs beat one buffered in memory.
+            u = _check_url(url, host_suffix)
+            ctx = ssl.create_default_context(cafile=cafile)
+            c2 = http.client.HTTPSConnection(u.hostname, u.port or 443, context=ctx)
+            headers = {'Accept': '*/*'}
+            auth = negotiate_header(u.hostname)
+            if auth:
+                headers['Authorization'] = auth
+            p = (u.path or '/') + (('?' + u.query) if u.query else '')
+            c2.request('GET', p, headers=headers)
+            r2 = c2.getresponse()
+            conn.sendall(json.dumps({'ok': True, 'bytes': total, 'sha256': got}).encode() + b'\n')
+            while True:
+                chunk = r2.read(65536)
+                if not chunk:
+                    break
+                conn.sendall(chunk)
+            c2.close()
+        except Exception as exc:
+            try:
+                conn.sendall(json.dumps({'ok': False, 'error': str(exc)[:400]}).encode() + b'\n')
+            except OSError:
+                pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+    _serve(path, handle)
+
 def main():
     parser = argparse.ArgumentParser(
         prog='mcp-krb-bridge',
         description='stdio <-> Streamable-HTTP MCP bridge with Kerberos (SPNEGO) SSO')
-    parser.add_argument('url', help='remote MCP endpoint, e.g. https://mcp.internal.example/mcp')
+    parser.add_argument('url', nargs='?',
+                        help='remote MCP endpoint, e.g. https://mcp.internal.example/mcp')
     parser.add_argument('--ca', metavar='PEM', default=None,
                         help='trust only this CA bundle instead of the system store '
                              '(IPA-enrolled machines already trust the IPA CA system-wide)')
+
+    # Fetch one file. For content that must arrive byte-exact, so it never
+    # passes through a model.
+    parser.add_argument('--fetch', metavar='URL', default=None,
+                        help='fetch URL over SPNEGO and write it to -o, instead of '
+                             'bridging stdio')
+    parser.add_argument('-o', '--output', metavar='PATH', default=None,
+                        help='destination for --fetch')
+    parser.add_argument('--sha256', metavar='HEX', default=None,
+                        help='verify the body before the file appears; a mismatch '
+                             'leaves nothing behind')
+    parser.add_argument('--max-bytes', type=int, default=DEFAULT_MAX_BYTES,
+                        help='refuse a body larger than this (default %d)' % DEFAULT_MAX_BYTES)
+    parser.add_argument('--force', action='store_true', help='overwrite an existing file')
+    parser.add_argument('--allow-outside', action='store_true',
+                        help='permit a destination outside the working directory')
+    parser.add_argument('--allow-host-suffix', metavar='SUFFIX', default=None,
+                        help='hosts allowed for --fetch (default: the Kerberos realm)')
+
+    # Serve, so a machine with no ticket can use this one's.
+    parser.add_argument('--listen', metavar='SOCKET', default=None,
+                        help='serve MCP over a 0600 Unix socket instead of stdio, for '
+                             'forwarding with ssh -R')
+    parser.add_argument('--fetch-listen', metavar='SOCKET', default=None,
+                        help='serve --fetch requests over a 0600 Unix socket')
     opts = parser.parse_args()
+
+    host_suffix = opts.allow_host_suffix or _realm_suffix()
+
+    if opts.fetch:
+        if not opts.output:
+            parser.error('--fetch needs -o PATH')
+        # Policy first, credentials second. A bad URL or a dangerous destination
+        # is knowable without a ticket, and reporting "no Kerberos credentials"
+        # for a refused destination sends people to fix the wrong thing.
+        try:
+            _check_url(opts.fetch, host_suffix)
+            _check_dest(opts.output, opts.force, opts.allow_outside)
+        except FetchRefused as exc:
+            log('refused: %s' % exc)
+            sys.exit(5)
+        try:
+            check_credentials()
+        except Exception as exc:
+            log('no usable Kerberos credentials: %s' % exc)
+            sys.exit(2)
+        try:
+            n, got = fetch_to_file(opts.fetch, opts.output, sha256=opts.sha256,
+                                   max_bytes=opts.max_bytes, force=opts.force,
+                                   allow_outside=opts.allow_outside, cafile=opts.ca,
+                                   host_suffix=host_suffix)
+        except FetchRefused as exc:
+            log('refused: %s' % exc); sys.exit(5)
+        except ValueError as exc:
+            log('%s' % exc); sys.exit(4)
+        except Exception as exc:
+            log('fetch failed: %s' % exc); sys.exit(3)
+        log('wrote %s (%d bytes, sha256 %s)' % (opts.output, n, got))
+        return
+
+    if opts.fetch_listen:
+        try:
+            check_credentials()
+        except Exception as exc:
+            log('no usable Kerberos credentials: %s' % exc); sys.exit(2)
+        serve_fetch_socket(opts.fetch_listen, cafile=opts.ca,
+                           host_suffix=host_suffix, max_bytes=opts.max_bytes)
+        return
+
+    if not opts.url:
+        parser.error('a URL is required unless --fetch or --fetch-listen is used')
+
+    if opts.listen:
+        try:
+            check_credentials()
+        except Exception as exc:
+            log('no usable Kerberos credentials: %s' % exc); sys.exit(2)
+        serve_mcp_socket(opts.listen, opts.url, cafile=opts.ca)
+        return
 
     # Keep pipes UTF-8 with plain \n on every platform (matters on Windows).
     for stream in (sys.stdin, sys.stdout):

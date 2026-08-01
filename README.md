@@ -30,6 +30,155 @@ account. It is off by default, reaches any Kerberized service (CI is only the
 example), and has the one genuinely subtle security story here. Its own section,
 [On-behalf-of delegation](#on-behalf-of-delegation), covers it.
 
+## How it fits together
+
+One idea holds this together: **a user credential exists in exactly one place,
+the workstation.** Every other machine either has its own machine identity, or
+has nothing at all. Nothing is copied, forwarded or minted to make a second you.
+
+```
+                     ┌────────────────────────────────────────┐
+                     │        FreeIPA:  KDC · DNS · CA        │
+                     │                                        │
+                     │   issues  TGTs to people               │
+                     │           keytabs to machines          │
+                     │           the CA that signs every host │
+                     └────────────────────────────────────────┘
+                        ▲                ▲                ▲
+               ① kinit  │      ② keytab  │       ③ ca.crt │ plain HTTP,
+                  (TGT) │      at enrol  │        to a new │ hash checked
+                        │                │         machine │ out of band
+  ╔═════════════════════╪════════════════╪════════════════╪═════════════════╗
+  ║ WORKSTATION         ┘                │                │                 ║
+  ║ the ONLY place a user ticket lives   │                │                 ║
+  ║ (on Windows: inside WSL)                                                ║
+  ║                                                                         ║
+  ║    MCP client ───stdio──▶┌────────┐                                     ║
+  ║         │                │ bridge │───── ④ SPNEGO ──────────────────┐   ║
+  ║         │ runs           └───┬────┘                                 │   ║
+  ║         ▼                    │ ⑦a --listen                          │   ║
+  ║    mcp-fetch ──┐             ▼                                      │   ║
+  ║                │      ~/.mcp-krb.sock  0600                         │   ║
+  ║                └──▶ ~/.mcp-krb-fetch.sock  0600  ⑦b                 │   ║
+  ║                              ▲                                      │   ║
+  ║    ssh ────── ⑤ ─────┐       │                                      │   ║
+  ╚══════════╪═══════════╪═══════╪══════════════════════════════════════╪═══╝
+             │           │       ║                                      │
+             │           │       ║   ssh -R, one per socket             │
+             │           │       ║   the SOCKETS are forwarded,         │
+             │           │       ║   never the credential               │
+             │           │       ║                                      │
+  ╔══════════╪═══════════╪═══════╪══════════════════════════════════════╪═══╗
+  ║ SHARED   │  DEV HOST         ║                                      │   ║
+  ║ ◀────────┘  ⑤ ssh in         ▼                                      │   ║
+  ║                    /run/user/N/mcp-krb.sock        ◀── ⑦a           │   ║
+  ║                    /run/user/N/mcp-krb-fetch.sock  ◀── ⑦b           │   ║
+  ║                              ▲            ▲                         │   ║
+  ║                       stdio  │            │ asks the workstation    │   ║
+  ║    MCP client ──▶ remote bridge       mcp-fetch                     │   ║
+  ║         │                                  ▲                        │   ║
+  ║         └────────── runs ──────────────────┘                        │   ║
+  ║                                                                     │   ║
+  ║    has a HOST keytab.  NO user ticket.  nothing here to steal.      │   ║
+  ╚═════════════════════════════════════════════════════════════════════╪═══╝
+             │                                                          │
+             │ ⑧ fetch a file, byte-exact                               │ ④
+             ▼                                                          ▼
+  ┌────────────────────────────────┐        ┌──────────────────────────────┐
+  │ any Kerberised service         │        │ the MCP server               │
+  │ git · CI · wiki · artifacts    │◀─ ⑥ ───│ 401 on every path            │
+  │                                │ on-be- │ holds a SERVICE keytab       │
+  │ whatever your shop runs; this  │ half-of│ your tools live here         │
+  │ repo assumes none of them      │        │ refuses a forwarded TGT      │
+  └────────────────────────────────┘        └──────────────────────────────┘
+
+  ┌────────────────────────────────┐
+  │ the provisioning page          │   the one deliberately anonymous surface:
+  │ served by this installer       │   a machine that is not enrolled yet has
+  │ client scripts, anonymous      │   no ticket, so the bundle it needs in
+  │ on purpose                     │   order to enrol cannot sit behind SPNEGO
+  └────────────────────────────────┘
+```
+
+**① `kinit`** The only step involving a human secret, on the only machine holding
+one.
+
+**② Host keytabs** Each enrolled machine gets its own identity. That proves a
+machine is itself; it says nothing about who *you* are and cannot be used to
+become you. A Mac never does this, which is why macOS leaves the realm untouched
+where Linux does not.
+
+**③ CA bootstrap** A new machine trusts nothing, so it fetches the realm CA over
+plain HTTP and checks it against a SHA-256 obtained elsewhere. That comparison is
+the whole check, which is why the hash must not come from the same infrastructure
+that serves the certificate.
+
+**④ MCP** The client speaks stdio to the bridge; the bridge speaks SPNEGO to the
+server. The ticket never moves, because the bridge is already where it is.
+
+**⑤ SSH** GSSAPI with `GSSAPIDelegateCredentials no`. Your ticket is **not**
+forwarded, which is why a shell on a shared host has no credentials. Design, not
+gap.
+
+**⑥ On-behalf-of** A tool can act as you against a downstream Kerberised service
+using constrained delegation with a narrow evidence credential, refusing a
+forwarded TGT. The example tool targets CI; the mechanism cares about none of
+that. See [On-behalf-of delegation](#on-behalf-of-delegation).
+
+**⑦ Forwarded sockets** `--listen` and `--fetch-listen` serve MCP and fetching
+over `0600` Unix sockets. `ssh -R` forwards them to a shared host, where
+`mcp-krb-remote-bridge.py` joins a client's stdio to them. The far end holds no
+credential, imports no crypto, and loses the channel when the session ends.
+
+**⑧ Fetching a file** `--fetch` writes a URL to disk over SPNEGO, for content
+that must arrive byte-exact and therefore must not pass through a model. On a
+shared host it goes via ⑦b, so the GET and the allowlist both happen where the
+ticket is.
+
+### Why there is a server at all
+
+Fair question, since the assistant already has a shell and your ticket, and could
+call an internal API itself.
+
+**Authorisation cannot be enforced on the client.** A tool that runs on your
+machine is a tool you can edit. "Only this group may trigger a build" living in a
+script on a workstation is a suggestion; behind an authenticated server it is a
+rule, because the check happens somewhere the caller does not control.
+
+**Audit needs a chokepoint.** Every call is recorded against the Kerberos
+principal that made it, allowed or denied. Fifty workstations calling an API
+directly produce no such record.
+
+**Delegation needs a service principal.** Acting as you against another service,
+without holding your TGT, requires an identity the realm knows and rules it
+enforces. A shell script cannot be granted that, and should not be.
+
+**And the corollary:** things you could already do belong in the shell, not
+behind a tool. `mcp-fetch` is deliberately **not** an MCP tool. The assistant
+already has your ticket, so wrapping an HTTP GET in a server call would add a
+hop, a schema and an audit line while changing nothing about what is possible.
+The test each tool should pass is: *could the caller do this themselves, unlogged,
+if the tool did not exist?* When the answer is yes, it does not belong here.
+
+### What the forwarded sockets cost
+
+Worth stating plainly, because shared hosts are the case they exist for and
+several people at different privilege levels may be logged into one at once.
+
+The sockets are `0600`, so an unprivileged peer cannot use them. **Root on that
+host can, while your session is open**, which on a box where colleagues hold sudo
+means those colleagues. After you disconnect the socket file remains but nothing
+answers it.
+
+So the exposure is bounded by your session rather than by a ticket lifetime. The
+alternative, running `kinit` on the shared host, leaves a ticket cache that root
+there can read and use to become you everywhere in the realm, for its full
+lifetime, still valid after you log out.
+
+It is structurally `ssh-agent` forwarding, with a narrower grant: agent forwarding
+gives SSH-to-anywhere, these give one service and one allowlist. The operational
+rule that follows is to avoid mixing privilege levels and sudo on one host.
+
 ## What it looks like
 
 A developer logs in to their workstation. That is the only time anyone types a
