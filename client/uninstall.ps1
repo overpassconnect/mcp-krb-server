@@ -59,7 +59,7 @@ if (-not (Test-Path $ManifestPath)) {
     Say 'The manifest is what records which of the following setup.ps1 actually'
     Say 'created on THIS machine, as opposed to what was already here:'
     Say "  $binDir\ssh-dispatch.bat, and $binDir itself"
-    Say '  the wslssh line in the PowerShell profile (marker: setup.ps1)'
+    Say '  the wslssh and mcp-fetch lines in the PowerShell profile (marker: setup.ps1)'
     Say '  remote.SSH.* keys in each editor settings.json, and their prior values'
     Say '  the internal-tools entry in .claude.json'
     Say '  everything inside the WSL distro (its own manifest lives there)'
@@ -104,15 +104,23 @@ foreach ($f in $created) {
     }
 }
 
-# --- 2. the wslssh line, by its marker comment, never by function name ------
+# --- 2. the profile lines, by marker comment, never by function name --------
 # A user who wrote their own `function wslssh` before or after the kit did
-# keeps it: only the line setup.ps1 stamped with its marker is the kit's.
-$marker = '# Kerberos ssh via WSL (setup.ps1)'
+# keeps it: only the lines setup.ps1 stamped with its markers are the kit's.
+# One marker per function it writes; a function added to setup.ps1 without its
+# marker added here survives uninstall forever.
+$markers = @(
+    '# Kerberos ssh via WSL (setup.ps1)',
+    '# Kerberos fetch via WSL (setup.ps1)'
+)
 if (Test-Path $ProfilePath) {
     $lines = @(Get-Content -Path $ProfilePath)
-    $kept = @($lines | Where-Object { -not $_.TrimEnd().EndsWith($marker) })
+    $kept = @($lines | Where-Object {
+        $line = $_.TrimEnd()
+        -not (@($markers | Where-Object { $line.EndsWith($_) }).Count)
+    })
     if ($kept.Count -ne $lines.Count) {
-        Say "  remove the wslssh line from $ProfilePath (matched by marker comment)"
+        Say "  remove $($lines.Count - $kept.Count) kit line(s) from $ProfilePath (matched by marker comment)"
         if ($act) {
             $remaining = @($kept | Where-Object { $_.Trim() })
             if ($remaining.Count -eq 0 -and ($created | Where-Object { $_ -ieq $ProfilePath })) {

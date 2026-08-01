@@ -291,11 +291,17 @@ else
         [ -d "$APPDIR/venv" ] || python3 -m venv "$APPDIR/venv"
         "$APPDIR/venv/bin/pip" install --quiet --upgrade pip
         "$APPDIR/venv/bin/pip" install --quiet gssapi
-        curl --proto '=https' --tlsv1.2 -fsS "$BASE_URL/mcp-krb-bridge.py" \
-            -o "$APPDIR/mcp-krb-bridge.py"
-        chmod 0755 "$APPDIR/mcp-krb-bridge.py"
-        note_created "$APPDIR/mcp-krb-bridge.py"
+        # The bridge, the inert half that a host with no ticket runs, and the
+        # wrapper that picks between them. A Mac is a workstation and will
+        # normally use only the first, but it is also the machine that forwards
+        # the socket, and mcp-fetch is the command its owner types.
+        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch; do
+            curl --proto '=https' --tlsv1.2 -fsS "$BASE_URL/$f" -o "$APPDIR/$f"
+            chmod 0755 "$APPDIR/$f"
+            note_created "$APPDIR/$f"
+        done
         say "bridge at $APPDIR/mcp-krb-bridge.py"
+        say "mcp-fetch at $APPDIR/mcp-fetch (add $APPDIR to PATH to type it plainly)"
 
         PY="$APPDIR/venv/bin/python3"
         ENTRY="{\"type\":\"stdio\",\"command\":\"$PY\",\"args\":[\"$APPDIR/mcp-krb-bridge.py\",\"$MCP_URL\"]}"

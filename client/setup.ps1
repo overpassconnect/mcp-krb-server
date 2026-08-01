@@ -652,10 +652,20 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
+# mcp-fetch runs in WSL because that is where the ticket is, which puts the
+# destination path across a filesystem boundary. A path like C:\tmp\x reaches a
+# WSL process as an ordinary relative filename, backslashes and all, so it would
+# create a file by that literal name and report success. The bridge refuses such
+# a path outright; this translates it instead, so the Windows spelling a Windows
+# user naturally types does the thing they meant. Relative paths need no help:
+# wsl.exe inherits the translated working directory.
+# One line, because the profile is kept idempotent by matching whole `function`
+# lines and a multi-line definition would leave orphans behind on re-run.
+$kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e mcp-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh function added (your `ssh` is left untouched)'
+Say 'PowerShell: wslssh and mcp-fetch functions added (your `ssh` is left untouched)'
 
 # --- 5. VS Code --------------------------------------------------------------
 # enableDynamicForwarding=false is deliberate. VS Code's default reaches the

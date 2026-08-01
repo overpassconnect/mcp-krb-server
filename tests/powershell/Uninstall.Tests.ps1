@@ -18,6 +18,8 @@ BeforeAll {
         @(
             'function wslssh { ssh my-own-thing @args }'
             'function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)'
+            'function mcp-fetch { my own version }'
+            'function mcp-fetch { wsl.exe -e mcp-fetch @args }   # Kerberos fetch via WSL (setup.ps1)'
         ) | Set-Content -Path (Join-Path $Root 'profile.ps1')
         @(
             '{'
@@ -112,6 +114,28 @@ Describe 'uninstall.ps1' {
         $profile = Get-Content -Raw (Join-Path $root 'profile.ps1')
         $profile | Should -Match 'my-own-thing'
         $profile | Should -Not -Match 'Kerberos ssh via WSL'
+    }
+
+    It 'every function setup.ps1 writes has a marker uninstall knows' {
+        # Each `function` line setup.ps1 appends to the profile carries a
+        # marker comment, and uninstall.ps1 matches on those markers. A
+        # function added to one without the other is invisible to uninstall,
+        # which is how a shim outlives the kit that installed it.
+        $setup = Get-Content -Raw (Join-Path $PSScriptRoot '..\..\client\setup.ps1')
+        $written = [regex]::Matches($setup, '\$kept \+= "function [^"]*# ([^"(]*\(setup\.ps1\))"')
+        $written.Count | Should -BeGreaterThan 1
+        $known = Get-Content -Raw $script:Script
+        foreach ($m in $written) {
+            $known | Should -Match ([regex]::Escape("# " + $m.Groups[1].Value))
+        }
+    }
+
+    It 'the mcp-fetch line goes, and a user-authored one stays' {
+        $r = Invoke-Uninstall -Root $root -Extra @('-Yes')
+        $r.Code | Should -Be 0
+        $profile = Get-Content -Raw (Join-Path $root 'profile.ps1')
+        $profile | Should -Match 'my own version'
+        $profile | Should -Not -Match 'Kerberos fetch via WSL'
     }
 
     It 'removes only the recorded entry from .claude.json' {

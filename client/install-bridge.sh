@@ -57,6 +57,14 @@ DEST="/opt/mcp-krb"
 MANAGED_FILE="/etc/claude-code/managed-mcp.json"
 
 BRIDGE="mcp-krb-bridge.py"
+# The other two halves of the same kit. The remote bridge is what an MCP client
+# on a host with no ticket talks to, and mcp-fetch picks between the two without
+# the caller having to know which kind of machine this is. Installed everywhere
+# rather than conditionally: a workstation today is somebody's shared dev host
+# next month, and a missing file is a worse discovery than an unused one.
+REMOTE="mcp-krb-remote-bridge.py"
+FETCH="mcp-fetch"
+FETCH_LINK="/usr/local/bin/mcp-fetch"
 MANIFEST="$DEST/install-manifest.json"
 
 # --- install manifest ---------------------------------------------------------
@@ -273,13 +281,15 @@ fetch_retry() {
     return 1
 }
 
-fetch_retry "$BRIDGE" "$tmp/$BRIDGE" || {
-    echo "ERROR: could not fetch $BASE/$BRIDGE - nothing was installed." >&2
-    echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
-    echo "  the MCP client shim was NOT installed. Finish by hand once the" >&2
-    echo "  publisher is reachable:" >&2
-    echo "    sh $0 --base-url $BASE --mcp-url $MCP_URL" >&2
-    exit 1; }
+for f in "$BRIDGE" "$REMOTE" "$FETCH"; do
+    fetch_retry "$f" "$tmp/$f" || {
+        echo "ERROR: could not fetch $BASE/$f - nothing was installed." >&2
+        echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
+        echo "  the MCP client shim was NOT installed. Finish by hand once the" >&2
+        echo "  publisher is reachable:" >&2
+        echo "    sh $0 --base-url $BASE --mcp-url $MCP_URL" >&2
+        exit 1; }
+done
 
 # Install atomically: `install` writes via a temp file and renames, so a
 # concurrent exec never sees a half-written bridge, and re-running just replaces
@@ -287,7 +297,28 @@ fetch_retry "$BRIDGE" "$tmp/$BRIDGE" || {
 # created may be recorded as removable in the manifest.
 DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
-$SUDO install -m 0755 "$tmp/$BRIDGE" "$DEST/$BRIDGE"
+for f in "$BRIDGE" "$REMOTE" "$FETCH"; do
+    $SUDO install -m 0755 "$tmp/$f" "$DEST/$f"
+done
+
+# mcp-fetch is a command people type, so it goes on PATH. A symlink rather than
+# a copy: the wrapper locates its siblings by directory, and two copies drifting
+# apart is the failure this avoids. Only a link this run created is recorded as
+# removable, so an existing mcp-fetch belonging to something else survives
+# uninstall.
+FETCH_LINKED=0
+if [ -e "$FETCH_LINK" ] || [ -L "$FETCH_LINK" ]; then
+    if [ "$(readlink "$FETCH_LINK" 2>/dev/null || true)" = "$DEST/$FETCH" ]; then
+        echo "OK: $FETCH_LINK already points at $DEST/$FETCH."
+    else
+        echo "WARNING: $FETCH_LINK exists and is not ours - left alone. Call the" >&2
+        echo "         wrapper as $DEST/$FETCH, or put $DEST on PATH." >&2
+    fi
+elif [ -d "$(dirname "$FETCH_LINK")" ]; then
+    $SUDO ln -s "$DEST/$FETCH" "$FETCH_LINK"
+    FETCH_LINKED=1
+fi
+
 python3 -c 'import gssapi' 2>/dev/null || \
     echo "WARNING: python3-gssapi not found - is this machine ipa-client-enrolled?" >&2
 
@@ -317,7 +348,8 @@ fi
 # path below is script-literal, which is what makes building the JSON by
 # concatenation safe. Non-fatal on failure, but loud: an install without a
 # manifest still works today and cannot be cleanly uninstalled tomorrow.
-FRAG_CREATED="\"$DEST/$BRIDGE\""
+FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\""
+[ "$FETCH_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_LINK\""
 [ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
 FRAG_DIRS=""
 [ "$DEST_EXISTED" = 0 ] && FRAG_DIRS="\"$DEST\""

@@ -145,6 +145,9 @@ path_is_ours() {
         "$APPROOT"|"$APPROOT"/*) return 0 ;;
         /etc/claude-code|/etc/claude-code/*) return 0 ;;
         "$MANAGED_FILE") return 0 ;;
+        # The mcp-fetch symlink, and only when the installer recorded creating
+        # it: an mcp-fetch that was already there is somebody else's.
+        /usr/local/bin/mcp-fetch) return 0 ;;
         /etc/krb5.conf) return 0 ;;
         /etc/resolver/*) return 0 ;;
         /usr/local/share/ca-certificates/*) return 0 ;;

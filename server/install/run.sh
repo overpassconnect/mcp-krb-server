@@ -42,7 +42,7 @@ usage: run.sh [options]
   --group NAME           service group                 (site.env: SVCGROUP)
   --webroot DIR          http-01 challenge docroot     (site.env: WEBROOT)
   --no-serve-client      do NOT serve the client bundle from this host.
-                         By default this host serves the five client files and
+                         By default this host serves the client files and
                          the provisioning page at /client/, so a fresh install
                          needs nothing extra. This turns that off, leaving the
                          vhost byte-identical to one that never had the feature.
@@ -1103,7 +1103,7 @@ if [ "$SERVE_CLIENT" = yes ]; then
     # appends the URI to the parent, so the last element of $CLIENT_ROOT must
     # equal the $CLIENT_PATH element; that is asserted after rendering.
     #
-    # index index.html serves the provisioning page at the path itself; the five
+    # index index.html serves the provisioning page at the path itself; the
     # client scripts and app.js/config.js sit alongside it. default_type
     # text/plain is for the extensionless scripts (setup.sh, install-bridge.sh, the
     # .ps1/.py); index.html and app.js get their real types from mime.types,
@@ -1545,14 +1545,14 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
     CLIENT_DNS="$CLIENT_DNS_IP"
     [ -n "$CLIENT_DNS" ] || CLIENT_DNS="$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
 
-    # The contract: the client bundle is the five client files plus the static
+    # The contract: the client bundle is the client scripts and bridges plus the static
     # page (index.html, app.js) and config.example.js. This list is the entire
     # interface with client/README.md: a workstation that cannot fetch one of
     # them fails partway through provisioning. Kept here so bundle assembly and
     # config.js writing live in one place. config.js is written by write_config
     # below rather than copied, so config.example.js ships as the shape
     # reference and the live config.js is generated per install.
-    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py web/index.html web/app.js web/config.example.js"
+    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py bridge/mcp-krb-remote-bridge.py bridge/mcp-fetch web/index.html web/app.js web/config.example.js"
     # Injects the site fragment into the page's markers and derives one nav
     # entry per section from its id and <h2>. Refuses a fragment that is not
     # root-owned or is group/world-writable: it becomes markup on the page that

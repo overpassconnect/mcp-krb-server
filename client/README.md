@@ -5,7 +5,7 @@ plus (on Windows) passwordless SSH and VS Code Remote-SSH against FreeIPA hosts.
 
 ## Where the files come from
 
-Five files have to be served over HTTPS so a workstation can bootstrap. Serving
+These files have to be served over HTTPS so a workstation can bootstrap. Serving
 them is a role that any host can fill: by default the MCP host fills it at
 `https://mcp.example.internal/client`, and an exported copy can be served from
 anywhere.
@@ -17,6 +17,8 @@ anywhere.
 | `install-bridge.sh` | install the MCP bridge only | `setup.sh`, `setup.ps1`, or a human |
 | `JsoncEdit.ps1` | helper used by `setup.ps1` | `setup.ps1` |
 | `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
+| `mcp-krb-remote-bridge.py` | the half that holds nothing, for a host with no ticket | `install-bridge.sh` |
+| `mcp-fetch` | fetch one URL byte-exact; picks between the two above | `install-bridge.sh` |
 
 ### The MCP host serves them
 
@@ -42,7 +44,7 @@ at this block. See [NG1] in [SECURITY.md](../SECURITY.md).
 ### Serving an exported bundle elsewhere
 
 You do not have to serve the bundle from the MCP host. Add `--client-export DIR`
-to the installer and it also writes the complete bundle (the five files, the
+to the installer and it also writes the complete bundle (the client files, the
 provisioning page, and a generated `config.js`) into `DIR`:
 
 ```sh
@@ -656,8 +658,9 @@ yet earned the word "supported".
 
 ## The bridge itself
 
-Everything above installs one file, `bridge/mcp-krb-bridge.py`. This section is
-what that file is.
+Everything above installs three files from `bridge/`. This section is what the
+first of them is; the other two are covered under
+[Fetching a file](#fetching-a-file-mcp-fetch).
 
 Claude Code talks to a tiny local process over stdio; the bridge forwards each
 JSON-RPC message to the Kerberized MCP server with a fresh
@@ -763,6 +766,89 @@ Docker Desktop.
 - Verified: the hermetic unit suite (`sh ../tests/run-tests.sh`, which prints
   the count, which is why none is written here) plus a live end-to-end run on real
   FreeIPA (bridge and server, including replay rejection).
+
+## Fetching a file: `mcp-fetch`
+
+Some content has to arrive byte-exact. A schema, a lockfile, a fixture, a
+config: a paraphrase of it is not it. Passing that through a model as text is
+the wrong shape, so the installers put a small command on `PATH`:
+
+```
+mcp-fetch https://host.example.internal/schema.json -o schema.json
+mcp-fetch https://host.example.internal/schema.json -o schema.json --sha256 <hex>
+```
+
+It authenticates with SPNEGO, streams to a temporary file in the destination
+directory, and renames only once the body is complete and any digest you gave
+matches. A failure therefore leaves no file at all, rather than a short one.
+Exit codes: `0` ok, `2` no Kerberos, `3` HTTP, `4` hash mismatch, `5` refused.
+
+It is deliberately **not** an MCP tool. The caller already holds the ticket
+that would authorise it, so putting a GET behind a server call would add a hop,
+a schema and an audit line while changing nothing about what is possible.
+
+What it refuses, and why, since these are the cases where a URL or a path came
+from model output rather than from you:
+
+| refused | because |
+|---|---|
+| `http://` | a `Negotiate` header in cleartext is observable |
+| a host outside the realm suffix | widen it deliberately with `--allow-host-suffix` |
+| any 3xx | forwarding an `Authorization` header across a cross-origin redirect has a long CVE history; fetch the final URL |
+| a destination outside the working directory | `--allow-outside` if meant |
+| an existing file, a symlink, a directory | `--force` for the first; never the others |
+| a body over `--max-bytes` (8 MB default) | enforced as the bytes arrive |
+| a path like `C:\tmp\x` off Windows | inside WSL that creates a file named literally that and exits 0 |
+
+On Windows the command is a PowerShell function, because the ticket lives in
+WSL. It translates an absolute `-o C:\...` with `wslpath -u` before handing it
+over; relative paths need no help, since `wsl.exe` inherits the working
+directory.
+
+### Using it from a shared host
+
+A shared dev host holds a *machine* keytab and no user ticket, by design:
+`ssh` runs with `GSSAPIDelegateCredentials no`, so nothing of yours is copied
+there. That leaves it unable to fetch anything as you, which is the point.
+
+The answer is to forward the socket rather than the credential. On the
+workstation, serve the two things a remote client needs:
+
+```
+mcp-krb-bridge.py --listen ~/.mcp-krb.sock https://mcp.example.internal/ &
+mcp-krb-bridge.py --fetch-listen ~/.mcp-krb-fetch.sock &
+```
+
+Then forward both, which `~/.ssh/config` can do for you:
+
+```
+Host dev.example.internal
+    RemoteForward /run/user/1000/mcp-krb.sock       /home/you/.mcp-krb.sock
+    RemoteForward /run/user/1000/mcp-krb-fetch.sock /home/you/.mcp-krb-fetch.sock
+```
+
+`RemoteForward` has taken Unix socket paths since OpenSSH 6.7. Use your own uid
+on the remote (`id -u`) in the left-hand paths; `~` is not expanded on that
+side. On the far end, `mcp-fetch` notices the socket and asks the workstation
+instead of trying to do it itself, and an MCP client is pointed at
+`mcp-krb-remote-bridge.py /run/user/1000/mcp-krb.sock`, which joins its stdio
+to the socket and holds nothing.
+
+**Set `StreamLocalBindUnlink yes` in the remote's `sshd_config`.** The default
+is `no`, which leaves the socket file behind when a session ends, and the next
+connection then fails to bind it. The symptom is a forward that worked once and
+never again until somebody deletes the file by hand.
+
+What this costs, stated plainly because shared hosts are the case it exists
+for: the sockets are `0600`, so an unprivileged peer cannot use them, but
+**root on that host can, while your session is open**, which on a box where
+colleagues hold sudo means those colleagues. The exposure is bounded by your
+session rather than by a ticket lifetime, and it ends when you disconnect. The
+alternative, running `kinit` there, leaves a cache root can read and replay to
+become you everywhere in the realm for its full lifetime, still valid after you
+log out. It is structurally `ssh-agent` forwarding with a narrower grant. The
+operational rule that follows is to avoid mixing privilege levels and sudo on
+one host.
 
 ## Rollback
 

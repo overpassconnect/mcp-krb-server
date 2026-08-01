@@ -541,8 +541,10 @@ client/          # everything that runs on a workstation
   install-bridge.sh         - install the client (downloaded over HTTPS, then run; never piped to a shell)
   JsoncEdit.ps1      - helper used by setup.ps1 to edit JSONC config in place
   README.md          - provisioning a Linux or Windows workstation, end to end
-  bridge/            # the MCP client Claude Code runs; what install-bridge.sh installs
+  bridge/            # what install-bridge.sh installs on a workstation
     mcp-krb-bridge.py  - the bridge itself (stdlib + python3-gssapi)
+    mcp-krb-remote-bridge.py - the inert half, for a host that holds no ticket
+    mcp-fetch          - fetch one URL byte-exact, over whichever of the two applies
     examples/          - mcp.json, mcp.json.windows, managed-mcp.json
 tests/           # hermetic unit tests (fake gssapi, no KDC needed)
   run-tests.sh, python/

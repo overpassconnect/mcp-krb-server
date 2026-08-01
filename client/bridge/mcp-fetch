@@ -1,0 +1,82 @@
+#!/bin/sh
+# mcp-fetch - fetch one URL over Kerberos, byte-exact, to a file.
+#
+# For content that has to arrive unchanged: a config file, a schema, a fixture,
+# anything where a paraphrase is not the same thing. Deliberately NOT an MCP
+# tool. The caller already holds the ticket that would authorise it, so wrapping
+# a GET in a server call would add a hop, a schema and an audit line while
+# changing nothing about what is possible (README, "Why there is a server at
+# all").
+#
+# The same command works in two places, which is the whole reason this wrapper
+# exists rather than two documented invocations:
+#
+#   on a workstation    the local bridge performs the GET with your ticket
+#   on a shared host    there is no ticket, so it asks the workstation over the
+#                       socket that `ssh -R` forwarded, and the GET happens
+#                       there
+#
+# Which of the two is picked is decided by whether that socket is present, so
+# nobody has to remember what kind of machine they are on. Every restriction on
+# what may be fetched is enforced on the workstation in both cases: a caller on
+# a shared host is exactly who those rules exist to constrain.
+#
+#   mcp-fetch https://host.example.internal/f.json -o f.json
+#   mcp-fetch https://host.example.internal/f.json -o f.json --sha256 <hex>
+#
+# Exit codes match the bridge: 0 ok, 2 no Kerberos, 3 HTTP, 4 hash mismatch,
+# 5 refused by policy.
+set -eu
+
+SOCKET="${MCP_KRB_FETCH_SOCKET:-/run/user/$(id -u)/mcp-krb-fetch.sock}"
+
+# MCP_KRB_HOME is an override, so it is obeyed exactly: pointing it somewhere
+# empty is an error, not a reason to quietly use the system install. Falling
+# through would run a different copy than the one named, which is the whole
+# thing the variable exists to prevent.
+if [ -n "${MCP_KRB_HOME:-}" ]; then
+    APPDIR="$MCP_KRB_HOME"
+    if [ ! -f "$APPDIR/mcp-krb-bridge.py" ] && [ ! -f "$APPDIR/mcp-krb-remote-bridge.py" ]; then
+        echo "mcp-fetch: MCP_KRB_HOME=$APPDIR holds no bridge." >&2
+        exit 2
+    fi
+else
+    # The two directories this kit installs to, in the order a machine has them.
+    APPDIR=""
+    for _d in /opt/mcp-krb "$HOME/Library/Application Support/mcp-krb"; do
+        if [ -f "$_d/mcp-krb-bridge.py" ] || [ -f "$_d/mcp-krb-remote-bridge.py" ]; then
+            APPDIR="$_d"
+            break
+        fi
+    done
+    if [ -z "$APPDIR" ]; then
+        echo "mcp-fetch: no bridge installed. Looked in /opt/mcp-krb and" >&2
+        echo "  \$HOME/Library/Application Support/mcp-krb. Set MCP_KRB_HOME to" >&2
+        echo "  point at another directory." >&2
+        exit 2
+    fi
+fi
+
+# macOS installs into a venv because python-gssapi is not a system package
+# there; Linux gets it from ipa-client and uses the system interpreter.
+if [ -x "$APPDIR/venv/bin/python3" ]; then
+    PY="$APPDIR/venv/bin/python3"
+else
+    PY=python3
+fi
+
+if [ -S "$SOCKET" ]; then
+    exec "$PY" "$APPDIR/mcp-krb-remote-bridge.py" --socket "$SOCKET" --fetch "$@"
+fi
+
+if [ ! -f "$APPDIR/mcp-krb-bridge.py" ]; then
+    echo "mcp-fetch: this host holds no ticket-capable bridge, and there is no" >&2
+    echo "  forwarded socket at $SOCKET" >&2
+    echo "" >&2
+    echo "  That socket is created by your own ssh -R and exists only while that" >&2
+    echo "  session is open. Reconnect with the forward in place; see" >&2
+    echo "  client/README.md, 'Using it from a shared host'." >&2
+    exit 2
+fi
+
+exec "$PY" "$APPDIR/mcp-krb-bridge.py" --fetch "$@"

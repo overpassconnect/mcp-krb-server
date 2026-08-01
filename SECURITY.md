@@ -429,7 +429,7 @@ construction. There are exactly two:
    fails.
 2. The client-bundle location on :443, present by default. run.sh replaces the
    `{{CLIENT_LOCATION}}` marker with a static `location ^~ $CLIENT_PATH` (default
-   `/client/`) serving the client bundle (the five files plus the provisioning page).
+   `/client/`) serving the client bundle (the client files plus the provisioning page).
    `--no-serve-client` replaces the marker with nothing, in which case the only
    unauthenticated path left is the ACME challenge one above. When the block exists it is
    deliberately unauthenticated, and that is required rather than incidental:
@@ -790,7 +790,7 @@ concerns, not code changes in this tree.
     rendered, substituted or signed on the way.
 
     Who verifies it depends on which host serves it. By default the MCP host serves
-    the bundle itself and `verify.sh` check 12 verifies it: it fetches the five files
+    the bundle itself and `verify.sh` check 12 verifies it: it fetches the client files
     and the page and requires HTTP 200 unauthenticated, failing on a 401, because
     a machine being provisioned holds no ticket yet. With `--no-serve-client` a
     separate host serves an exported copy, it is outside this repo, and

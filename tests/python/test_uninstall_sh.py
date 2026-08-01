@@ -94,6 +94,29 @@ class UninstallSh(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('remove package', r.stdout)
 
+    def test_the_mcp_fetch_link_is_removed_when_the_installer_made_it(self):
+        # It lives outside the kit tree, so it needs an explicit entry in
+        # path_is_ours. Without one it is named in the plan, refused, and left
+        # on PATH pointing at a directory that no longer exists.
+        m = dict(MANIFEST)
+        m['created'] = MANIFEST['created'] + ['/usr/local/bin/mcp-fetch']
+        self.make_tree(manifest=m)
+        self.put('usr/local/bin/mcp-fetch', '#!/bin/sh')
+        r = self.run_uninstall('--yes')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('left alone: /usr/local/bin/mcp-fetch', r.stdout)
+        self.assertFalse(os.path.exists(self.path('usr/local/bin/mcp-fetch')))
+
+    def test_an_mcp_fetch_the_installer_did_not_make_is_left_alone(self):
+        # Same path, absent from the manifest: somebody else's, and not ours to
+        # delete.
+        self.make_tree()
+        self.put('usr/local/bin/mcp-fetch', 'SOMEONE ELSE')
+        r = self.run_uninstall('--yes')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.path('usr/local/bin/mcp-fetch')) as f:
+            self.assertEqual(f.read(), 'SOMEONE ELSE')
+
     # --- refusals --------------------------------------------------------
 
     def test_missing_manifest_exits_nonzero_and_removes_nothing(self):
