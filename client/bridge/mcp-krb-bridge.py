@@ -44,6 +44,7 @@ import http.client
 import re
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import tempfile
@@ -395,17 +396,14 @@ def _check_dest(dest, force, allow_outside):
     return parent
 
 
-def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
-                  force=False, allow_outside=False, cafile=None,
-                  host_suffix=None, _write=True):
-    """SPNEGO GET of one URL, written to dest. Returns (bytes, hexdigest).
+def _open_response(url, cafile=None, host_suffix=None):
+    """Policy, then one GET, then the status checks. Returns (conn, resp, path).
 
-    Writes through a temporary file in the destination directory and renames
-    only after the hash checks out, so "appears on disk" and "is complete" are
-    the same event."""
+    Split out from fetch_to_file so that serving over a socket can stream the
+    same single response instead of repeating the request. Fetching a URL twice
+    to describe it once would make the digest a claim about a response nobody
+    received."""
     u = _check_url(url, host_suffix)
-    parent = _check_dest(dest, force, allow_outside) if _write else '.'
-
     ctx = ssl.create_default_context(cafile=cafile)
     conn = http.client.HTTPSConnection(u.hostname, u.port or 443, context=ctx)
     path = u.path or '/'
@@ -415,44 +413,67 @@ def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
     auth = negotiate_header(u.hostname)
     if auth:
         headers['Authorization'] = auth
-    conn.request('GET', path, headers=headers)
-    resp = conn.getresponse()
+    try:
+        conn.request('GET', path, headers=headers)
+        resp = conn.getresponse()
 
-    # http.client does not follow redirects, and that immunity is deliberate:
-    # forwarding an Authorization header across a cross-origin redirect is a
-    # class with a long CVE history. Refuse rather than reimplement it.
-    if 300 <= resp.status < 400:
-        raise FetchRefused('refusing to follow a %d redirect to %r. Fetch the '
-                           'final URL directly.' % (resp.status, resp.getheader('Location')))
-    if resp.status != 200:
-        body = resp.read(512)
-        raise RuntimeError('HTTP %d from %s%s: %s' % (resp.status, u.hostname, path,
-                                                      body[:200].decode('utf-8', 'replace')))
+        # http.client does not follow redirects, and that immunity is
+        # deliberate: forwarding an Authorization header across a cross-origin
+        # redirect is a class with a long CVE history. Refuse rather than
+        # reimplement it.
+        if 300 <= resp.status < 400:
+            raise FetchRefused('refusing to follow a %d redirect to %r. Fetch the '
+                               'final URL directly.' % (resp.status, resp.getheader('Location')))
+        if resp.status != 200:
+            body = resp.read(512)
+            raise RuntimeError('HTTP %d from %s%s: %s' % (resp.status, u.hostname, path,
+                                                          body[:200].decode('utf-8', 'replace')))
+    except Exception:
+        conn.close()
+        raise
+    return conn, resp, path
 
+
+def _stream(resp, sink, max_bytes, sha256=None):
+    """Feed the body to sink in chunks. Returns (bytes, hexdigest).
+
+    max_bytes is enforced here, as the bytes arrive, so every caller gets the
+    cap whether it is writing a file or filling a socket."""
     digest = hashlib.sha256()
     total = 0
-    tmp_fd = tmp_name = None
-    if _write:
-        tmp_fd, tmp_name = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FetchRefused('response exceeds the %d byte limit' % max_bytes)
+        digest.update(chunk)
+        sink(chunk)
+    got = digest.hexdigest()
+    if sha256 and got != sha256.lower().replace(':', ''):
+        raise ValueError('sha256 mismatch\n  expected %s\n  got      %s' % (sha256, got))
+    return total, got
+
+
+def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
+                  force=False, allow_outside=False, cafile=None,
+                  host_suffix=None):
+    """SPNEGO GET of one URL, written to dest. Returns (bytes, hexdigest).
+
+    Writes through a temporary file in the destination directory and renames
+    only after the hash checks out, so "appears on disk" and "is complete" are
+    the same event."""
+    _check_url(url, host_suffix)                 # before a single packet moves
+    parent = _check_dest(dest, force, allow_outside)
+    conn, resp, _path = _open_response(url, cafile=cafile, host_suffix=host_suffix)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
     try:
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise FetchRefused('response exceeds --max-bytes (%d)' % max_bytes)
-            digest.update(chunk)
-            if _write:
-                os.write(tmp_fd, chunk)
-        got = digest.hexdigest()
-        if sha256 and got != sha256.lower().replace(':', ''):
-            raise ValueError('sha256 mismatch\n  expected %s\n  got      %s'
-                             % (sha256, got))
-        if _write:
-            os.close(tmp_fd); tmp_fd = None
-            os.replace(tmp_name, dest)      # atomic on POSIX and Windows
-            tmp_name = None
+        total, got = _stream(resp, lambda b: os.write(tmp_fd, b), max_bytes, sha256)
+        os.close(tmp_fd); tmp_fd = None
+        os.replace(tmp_name, dest)      # atomic on POSIX and Windows
+        tmp_name = None
         return total, got
     finally:
         if tmp_fd is not None:
@@ -475,7 +496,13 @@ def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
 
 def _bind_socket(path):
     """Bind a 0600 Unix socket, clearing a stale one only if nothing answers."""
-    if os.path.exists(path):
+    if os.path.lexists(path):
+        # Only ever remove a socket. A typo'd path that lands on a real file is
+        # the likeliest way to reach this branch, and deleting it would be a
+        # far worse answer than refusing.
+        if not stat.S_ISSOCK(os.lstat(path).st_mode):
+            sys.exit('mcp-krb-bridge: %s exists and is not a socket. Refusing to '
+                     'remove it; choose another path.' % path)
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             probe.connect(path)
@@ -571,6 +598,8 @@ def serve_fetch_socket(path, cafile=None, host_suffix=None,
     caller on the far end of a forwarded socket is exactly who they would be
     protecting us from, so their copy of the rules would be worth nothing."""
     def handle(conn):
+        streaming = False
+        http_conn = None
         try:
             buf = b''
             while b'\n' not in buf:
@@ -583,38 +612,34 @@ def serve_fetch_socket(path, cafile=None, host_suffix=None,
             req = json.loads(buf.split(b'\n', 1)[0].decode('utf-8'))
             url = str(req.get('url', ''))[:2048]
             log('fetch request: %s' % url)
-            total, got = fetch_to_file(url, dest=None, cafile=cafile,
-                                       host_suffix=host_suffix,
-                                       max_bytes=max_bytes, _write=False)
-            # Re-fetch straight to the socket now that policy has passed. Kept
-            # simple deliberately: two small GETs beat one buffered in memory.
-            u = _check_url(url, host_suffix)
-            ctx = ssl.create_default_context(cafile=cafile)
-            c2 = http.client.HTTPSConnection(u.hostname, u.port or 443, context=ctx)
-            headers = {'Accept': '*/*'}
-            auth = negotiate_header(u.hostname)
-            if auth:
-                headers['Authorization'] = auth
-            p = (u.path or '/') + (('?' + u.query) if u.query else '')
-            c2.request('GET', p, headers=headers)
-            r2 = c2.getresponse()
-            conn.sendall(json.dumps({'ok': True, 'bytes': total, 'sha256': got}).encode() + b'\n')
-            while True:
-                chunk = r2.read(65536)
-                if not chunk:
-                    break
-                conn.sendall(chunk)
-            c2.close()
+
+            # One GET. Everything that can be refused is refused before the
+            # header line goes out, so a refusal is a clean "no" rather than a
+            # truncated body.
+            http_conn, resp, _p = _open_response(url, cafile=cafile,
+                                                 host_suffix=host_suffix)
+            conn.sendall(b'{"ok": true}\n')
+            streaming = True
+            total, got = _stream(resp, lambda b: conn.sendall(b'%08x\r\n' % len(b) + b),
+                                 max_bytes)
+            conn.sendall(b'00000000\r\n' + json.dumps(
+                {'ok': True, 'bytes': total, 'sha256': got}).encode() + b'\n')
         except Exception as exc:
+            err = json.dumps({'ok': False, 'error': str(exc)[:400]}).encode() + b'\n'
             try:
-                conn.sendall(json.dumps({'ok': False, 'error': str(exc)[:400]}).encode() + b'\n')
+                # Mid-stream, the failure has to reach the far end as a trailer,
+                # because the header already promised a body. No trailer means
+                # no file: the remote will not rename what it cannot confirm.
+                conn.sendall((b'00000000\r\n' if streaming else b'') + err)
             except OSError:
                 pass
         finally:
-            try:
-                conn.close()
-            except OSError:
-                pass
+            for c in (http_conn, conn):
+                try:
+                    if c is not None:
+                        c.close()
+                except OSError:
+                    pass
     _serve(path, handle)
 
 def main():

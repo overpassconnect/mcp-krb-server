@@ -102,42 +102,62 @@ def fetch(path, url, dest, sha256=None, force=False):
     s = connect(path)
     s.sendall(json.dumps({'url': url}).encode('utf-8') + b'\n')
 
-    # One JSON line of status, then the body.
-    head = b''
-    while b'\n' not in head:
-        chunk = s.recv(BUF)
-        if not chunk:
-            sys.exit('the workstation closed the connection without answering')
-        head += chunk
-    line, rest = head.split(b'\n', 1)
-    status = json.loads(line.decode('utf-8'))
-    if not status.get('ok'):
-        sys.exit('the workstation refused: %s' % status.get('error', 'unknown'))
+    # The wire is: one JSON line, then length-prefixed frames, then a zero
+    # frame, then a JSON trailer. The digest cannot be known before the body
+    # is sent, which is exactly why it arrives after it.
+    buf = bytearray()
+
+    def need(n):
+        while len(buf) < n:
+            chunk = s.recv(BUF)
+            if not chunk:
+                sys.exit('the workstation closed the connection mid-answer; '
+                         'nothing was written')
+            buf.extend(chunk)
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    def line():
+        while b'\n' not in buf:
+            chunk = s.recv(BUF)
+            if not chunk:
+                sys.exit('the workstation closed the connection without answering')
+            buf.extend(chunk)
+        i = buf.index(b'\n')
+        out = bytes(buf[:i])
+        del buf[:i + 1]
+        return json.loads(out.decode('utf-8'))
+
+    head = line()
+    if not head.get('ok'):
+        sys.exit('the workstation refused: %s' % head.get('error', 'unknown'))
 
     digest = hashlib.sha256()
     total = 0
     fd, tmp = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
     try:
-        def take(b):
-            nonlocal total
-            total += len(b)
-            digest.update(b)
-            os.write(fd, b)
-
-        if rest:
-            take(rest)
         while True:
-            chunk = s.recv(BUF)
-            if not chunk:
+            n = int(need(10)[:8], 16)
+            if n == 0:
                 break
-            take(chunk)
+            chunk = need(n)
+            total += n
+            digest.update(chunk)
+            os.write(fd, chunk)
+
+        # The trailer is the only thing that authorises a rename. A stream that
+        # stops early, or one the workstation gave up on, never reaches here.
+        trailer = line()
+        if not trailer.get('ok'):
+            sys.exit('the workstation aborted: %s' % trailer.get('error', 'unknown'))
 
         got = digest.hexdigest()
-        want = (sha256 or status.get('sha256') or '').lower().replace(':', '')
+        want = (sha256 or trailer.get('sha256') or '').lower().replace(':', '')
         if want and got != want:
             sys.exit('sha256 mismatch\n  expected %s\n  got      %s' % (want, got))
-        if total != status.get('bytes', total):
-            sys.exit('short read: expected %s bytes, got %d' % (status.get('bytes'), total))
+        if total != trailer.get('bytes', total):
+            sys.exit('short read: expected %s bytes, got %d' % (trailer.get('bytes'), total))
         os.close(fd); fd = None
         os.replace(tmp, dest)         # only now does the file appear
         tmp = None

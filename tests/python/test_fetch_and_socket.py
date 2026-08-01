@@ -130,6 +130,121 @@ class TestSourceProperties(unittest.TestCase):
         self.assertNotIn("RequirementFlag.delegate_to_peer", src)
 
 
+class TestOneRequestPerFetch(unittest.TestCase):
+    """The socket path must not re-request what it already has.
+
+    An earlier version fetched twice: once to measure, once to deliver. That
+    made the announced digest a statement about a response the caller never
+    received, so any URL that was not byte-stable failed, and the size limit
+    applied only to the measuring pass.
+    """
+
+    def test_the_fetch_handler_opens_exactly_one_response(self):
+        src = BRIDGE.read_text(encoding="utf-8")
+        handler = src[src.index("def serve_fetch_socket"):src.index("def main")]
+        self.assertEqual(handler.count("_open_response"), 1)
+        self.assertNotIn("HTTPSConnection", handler,
+                         "the handler must reuse _open_response, not open its own")
+
+    def test_the_size_limit_lives_where_the_bytes_are_counted(self):
+        src = BRIDGE.read_text(encoding="utf-8")
+        stream = src[src.index("def _stream"):src.index("def fetch_to_file")]
+        self.assertIn("max_bytes", stream)
+        self.assertIn("raise FetchRefused", stream)
+
+
+class TestListenRefusesToDestroy(unittest.TestCase):
+    """--listen removes a stale socket. It must not remove anything else."""
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets")
+    def test_a_regular_file_in_the_way_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as d:
+            victim = os.path.join(d, "notes.txt")
+            pathlib.Path(victim).write_text("precious", encoding="utf-8")
+            r = run(["--listen", victim, "https://host.example.internal/mcp"])
+            self.assertNotEqual(r.returncode, 0)
+            self.assertTrue(os.path.exists(victim), "the bridge deleted a real file")
+            self.assertEqual(pathlib.Path(victim).read_text(encoding="utf-8"), "precious")
+            self.assertIn("not a socket", r.stderr + r.stdout)
+
+
+class TestRemoteFetchWireProtocol(unittest.TestCase):
+    """The remote end writes a file only when the workstation says it is whole.
+
+    These run against a stub speaking the wire format, so they need no realm:
+    the point is what the client does when the far end misbehaves.
+    """
+
+    def serve(self, script):
+        import socket as _s
+        import threading
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "s.sock")
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+
+        def run_once():
+            conn, _ = srv.accept()
+            while b"\n" not in conn.recv(4096):
+                pass
+            script(conn)
+            conn.close()
+
+        threading.Thread(target=run_once, daemon=True).start()
+        self.addCleanup(srv.close)
+        return d, path
+
+    def client(self, path, cwd):
+        return subprocess.run(
+            [sys.executable, str(REMOTE), "--fetch", "https://h.example.internal/x",
+             "-o", os.path.join(cwd, "out.bin"), "--socket", path],
+            capture_output=True, text=True, timeout=30)
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets")
+    def test_a_complete_answer_is_written(self):
+        body = b"hello world"
+        import hashlib as _h
+        digest = _h.sha256(body).hexdigest()
+
+        def script(conn):
+            conn.sendall(b'{"ok": true}\n')
+            conn.sendall(b"%08x\r\n" % len(body) + body)
+            conn.sendall(b'00000000\r\n{"ok": true, "bytes": %d, "sha256": "%s"}\n'
+                         % (len(body), digest.encode()))
+
+        d, path = self.serve(script)
+        r = self.client(path, d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(pathlib.Path(d, "out.bin").read_bytes(), body)
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets")
+    def test_a_stream_that_stops_before_the_trailer_writes_nothing(self):
+        # What a mid-fetch failure on the workstation looks like from here.
+        def script(conn):
+            conn.sendall(b'{"ok": true}\n')
+            conn.sendall(b"%08x\r\n" % 4 + b"part")
+
+        d, path = self.serve(script)
+        r = self.client(path, d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(d, "out.bin")))
+        self.assertFalse([f for f in os.listdir(d) if f.startswith(".mcp-fetch-")])
+
+    @unittest.skipIf(os.name == "nt", "Unix sockets")
+    def test_an_abort_trailer_is_reported_and_nothing_is_written(self):
+        def script(conn):
+            conn.sendall(b'{"ok": true}\n')
+            conn.sendall(b"%08x\r\n" % 4 + b"part")
+            conn.sendall(b'00000000\r\n{"ok": false, "error": "too big"}\n')
+
+        d, path = self.serve(script)
+        r = self.client(path, d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("too big", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(d, "out.bin")))
+
+
 class TestRemoteBridgeHoldsNothing(unittest.TestCase):
     """The remote end runs on a shared host. Its value is being inert."""
 
