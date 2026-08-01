@@ -6,6 +6,7 @@ protects against a URL or a destination path that arrived from model output.
 """
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -130,6 +131,88 @@ class TestSourceProperties(unittest.TestCase):
         self.assertNotIn("RequirementFlag.delegate_to_peer", src)
 
 
+class TestBothWritersRefuseTheSameDestinations(unittest.TestCase):
+    """mcp-fetch picks a writer by which machine it is on. The refusals must
+    not depend on that choice.
+
+    The destination checks are a copy in the remote bridge rather than an
+    import, because that file has to load on a host with no Kerberos stack.
+    A copy silently drifting is the obvious failure, and it is the dangerous
+    one: the weaker side is the one that actually writes the file, on the
+    shared host, where a path from model output is no less of a risk.
+    """
+
+    CASES = [
+        ("a Windows path", lambda d: r"C:\tmp\x", "Windows path"),
+        ("a symlink", None, "symlink"),
+        ("a directory", None, "is a directory"),
+        ("outside the working directory", None, "outside the working directory"),
+        ("an existing file", None, "exists"),
+    ]
+
+    def build(self, tmp):
+        """The cases that need something on disk first."""
+        pathlib.Path(tmp, "real").write_text("x", encoding="utf-8")
+        try:
+            os.symlink(os.path.join(tmp, "real"), os.path.join(tmp, "link"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        os.mkdir(os.path.join(tmp, "adir"))
+        pathlib.Path(tmp, "there").write_text("original", encoding="utf-8")
+        return {
+            "a symlink": "link",
+            "a directory": "adir",
+            "an existing file": "there",
+            "outside the working directory":
+                os.path.join(tempfile.gettempdir(), "mcp-parity-probe"),
+        }
+
+    def local(self, dest, cwd):
+        return run(["--fetch", "https://h.example.internal/x", "-o", dest,
+                    "--allow-host-suffix", ".example.internal"], cwd=cwd)
+
+    def remote(self, dest, cwd):
+        # No socket is needed: every one of these is decided before connecting.
+        return subprocess.run(
+            [sys.executable, str(REMOTE), "--fetch", "https://h.example.internal/x",
+             "-o", dest, "--socket", os.path.join(cwd, "nonexistent.sock")],
+            capture_output=True, text=True, cwd=cwd, timeout=30)
+
+    @unittest.skipIf(os.name == "nt", "the remote bridge targets Unix-socket hosts")
+    def test_the_two_writers_agree(self):
+        for label, path_fn, expected in self.CASES:
+            with self.subTest(case=label):
+                tmp = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+                built = self.build(tmp)
+                dest = path_fn(tmp) if path_fn else built[label]
+
+                a = self.local(dest, tmp)
+                b = self.remote(dest, tmp)
+                self.assertNotEqual(a.returncode, 0, "workstation accepted %s" % label)
+                self.assertNotEqual(b.returncode, 0, "shared host accepted %s" % label)
+                self.assertIn(expected, a.stderr + a.stdout)
+                self.assertIn(expected, b.stderr + b.stdout,
+                              "the remote bridge does not refuse %s the way the "
+                              "workstation does" % label)
+                self.assertFalse(
+                    [f for f in os.listdir(tmp) if f.startswith(".mcp-fetch-")],
+                    "a refusal left a temporary file behind")
+
+    @unittest.skipIf(os.name == "nt", "the remote bridge targets Unix-socket hosts")
+    def test_flags_that_change_a_destination_exist_on_both(self):
+        # A flag accepted by one and an argparse error on the other makes
+        # "the same command works in both places" false, which is the only
+        # reason the wrapper exists.
+        for flag in ("--allow-outside", "--force", "--sha256", "--max-bytes"):
+            with self.subTest(flag=flag):
+                a = run(["--help"])
+                b = subprocess.run([sys.executable, str(REMOTE), "--help"],
+                                   capture_output=True, text=True, timeout=30)
+                self.assertIn(flag, a.stdout)
+                self.assertIn(flag, b.stdout)
+
+
 class TestOneRequestPerFetch(unittest.TestCase):
     """The socket path must not re-request what it already has.
 
@@ -196,10 +279,12 @@ class TestRemoteFetchWireProtocol(unittest.TestCase):
         return d, path
 
     def client(self, path, cwd):
+        # cwd matters: the destination is confined to the working directory
+        # unless --allow-outside is given, exactly as on the workstation.
         return subprocess.run(
             [sys.executable, str(REMOTE), "--fetch", "https://h.example.internal/x",
-             "-o", os.path.join(cwd, "out.bin"), "--socket", path],
-            capture_output=True, text=True, timeout=30)
+             "-o", "out.bin", "--socket", path],
+            capture_output=True, text=True, cwd=cwd, timeout=30)
 
     @unittest.skipIf(os.name == "nt", "Unix sockets")
     def test_a_complete_answer_is_written(self):

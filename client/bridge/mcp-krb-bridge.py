@@ -611,6 +611,16 @@ def serve_fetch_socket(path, cafile=None, host_suffix=None,
                     raise FetchRefused('request line too long')
             req = json.loads(buf.split(b'\n', 1)[0].decode('utf-8'))
             url = str(req.get('url', ''))[:2048]
+            # A caller may ask for a smaller cap than this one, never a larger:
+            # the limit belongs to the machine holding the credential, and the
+            # far end is who it exists to constrain.
+            cap = max_bytes
+            try:
+                asked = int(req.get('max_bytes') or 0)
+                if 0 < asked < cap:
+                    cap = asked
+            except (TypeError, ValueError):
+                pass
             log('fetch request: %s' % url)
 
             # One GET. Everything that can be refused is refused before the
@@ -621,7 +631,7 @@ def serve_fetch_socket(path, cafile=None, host_suffix=None,
             conn.sendall(b'{"ok": true}\n')
             streaming = True
             total, got = _stream(resp, lambda b: conn.sendall(b'%08x\r\n' % len(b) + b),
-                                 max_bytes)
+                                 cap)
             conn.sendall(b'00000000\r\n' + json.dumps(
                 {'ok': True, 'bytes': total, 'sha256': got}).encode() + b'\n')
         except Exception as exc:
