@@ -347,5 +347,60 @@ class PolicyPersistence(unittest.TestCase):
         self.assertNotEqual(e0, authz.policy_etag())
 
 
+class PageTemplate(unittest.TestCase):
+    """Properties of the served HTML that only a browser would otherwise catch.
+
+    The page is a Python string containing JavaScript, which is a quiet trap:
+    Python consumes backslash escapes before the browser ever sees them, and
+    the result is still a valid Python module. Nothing fails until the page is
+    loaded.
+    """
+
+    def test_the_template_stays_a_raw_string(self):
+        src = authz_editor._HTML
+        # Two characters, backslash then n, inside a JS string literal.
+        self.assertIn(r'split("\n")', src)
+        # A real newline there would be a JS syntax error.
+        self.assertNotIn('split("' + chr(10) + '")', src)
+        # The token regex needs a doubled backslash; a single one is a
+        # different, wrong pattern that happens to still compile.
+        self.assertIn(r'[^"\\]', src)
+        self.assertIn(r'(\s*:)', src)
+
+    def test_the_two_layers_exist(self):
+        src = authz_editor._HTML
+        for needed in ('id="hl"', 'id="policy"', 'class="editor"', 'wrap="off"'):
+            self.assertIn(needed, src)
+        # White-space handling and wrapping must be identical in both layers or
+        # the caret drifts away from the glyphs it is sitting on.
+        self.assertIn('white-space: pre;', src)
+
+    def test_every_write_to_the_textarea_repaints(self):
+        # The highlighted layer is a copy. A write that does not repaint leaves
+        # the two showing different text, which looks like corruption.
+        src = authz_editor._HTML
+        writes = [i for i in range(len(src)) if src.startswith('ta.value = ', i)]
+        self.assertGreaterEqual(len(writes), 2)
+        for i in writes:
+            following = src[i:i + 260]
+            self.assertIn('refresh();', following,
+                          'a write to ta.value is not followed by refresh()')
+
+    def test_both_json_error_dialects_are_parsed(self):
+        # V8 reports "at position 42"; SpiderMonkey reports "at line 3 column
+        # 27". Handling one engine means the caret silently fails to move in
+        # the other, which is how this shipped working only in Chrome.
+        src = authz_editor._HTML
+        self.assertIn(r'/position (\d+)/', src)
+        self.assertIn(r'/line (\d+) column (\d+)/', src)
+
+    def test_the_page_carries_no_external_asset(self):
+        # default-src 'none' would block them anyway; this catches the mistake
+        # at review time rather than as a blank page.
+        src = authz_editor._HTML
+        for scheme in ('http://', 'https://', '//cdn', 'integrity='):
+            self.assertNotIn(scheme, src)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -318,7 +318,14 @@ class AuthzEditorApp:
 # CSP (default-src 'none'). It fetches the current policy + ETag, lets the admin
 # edit the JSON, and PUTs it back with If-Match. No external assets, no inline
 # handlers, no framework.
-_HTML = """<!doctype html>
+#
+# A RAW string, and it has to stay one. The JS below uses backslash escapes in
+# regexes and in string literals. Without the r-prefix Python consumes them
+# first: a backslash-n inside a JS string becomes a real newline, which is a JS
+# syntax error, and a doubled backslash in the token regex collapses to a single
+# one, which is a different and wrong pattern. Neither shows up until the page
+# is loaded in a browser. Nothing in this template needs Python-level escapes.
+_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -328,11 +335,48 @@ _HTML = """<!doctype html>
   body { font: 14px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
   h1 { font-size: 1.25rem; }
   .meta { color: #555; font-size: 12px; margin-bottom: 1rem; }
-  textarea { width: 100%; height: 340px; font-family: ui-monospace, monospace; font-size: 13px; box-sizing: border-box; }
   button { font-size: 14px; padding: 6px 14px; margin-right: 8px; }
   #status { margin-top: 10px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
   .ok { color: #137333; } .err { color: #b00020; }
   code { background: #f2f2f2; padding: 1px 4px; }
+
+  /* The textarea sits transparent on top of a <pre> holding the coloured copy.
+     A textarea cannot be styled per-token, and pulling in an editor component
+     to colour five token types is not a trade worth making here.
+
+     Every metric below has to match in both layers or the caret drifts from
+     the glyphs, which is why they share one rule and why wrapping is off:
+     soft wrap in a textarea is not reproducible in a <pre> without guessing at
+     the same break points. */
+  .editor { position: relative; height: 340px; }
+  .editor > * {
+    position: absolute; inset: 0; margin: 0; width: 100%; height: 100%;
+    box-sizing: border-box; padding: 6px; border: 1px solid #767676;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre; overflow: auto; tab-size: 2;
+  }
+  #hl { pointer-events: none; z-index: 0; background: #fff; color: #24292f; }
+  #policy {
+    z-index: 1; resize: none; background: transparent;
+    color: transparent; caret-color: #24292f;
+  }
+  #policy::selection { background: #b3d7ff; }
+  .k { color: #0550ae; }          /* object key      */
+  .s { color: #0a7c3e; }          /* string value    */
+  .n { color: #953800; }          /* number          */
+  .l { color: #8250df; }          /* true false null */
+  #valid { min-height: 1.2em; margin-top: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d1117; color: #c9d1d9; }
+    .meta { color: #8b949e; } code { background: #21262d; }
+    .editor > * { border-color: #30363d; }
+    #hl { background: #0d1117; color: #c9d1d9; }
+    #policy { caret-color: #c9d1d9; }
+    .k { color: #79c0ff; } .s { color: #7ee787; }
+    .n { color: #ffa657; } .l { color: #d2a8ff; }
+    .ok { color: #3fb950; } .err { color: #ff7b72; }
+  }
 </style>
 </head>
 <body>
@@ -343,7 +387,12 @@ _HTML = """<!doctype html>
   or <code>"%ANYTOKEN%"</code> for any authenticated principal. Only registered
   tools are accepted; omitted tools keep their reviewed code default.
 </div>
-<textarea id="policy" spellcheck="false" aria-label="policy JSON"></textarea>
+<div class="editor">
+  <pre id="hl" aria-hidden="true"></pre>
+  <textarea id="policy" spellcheck="false" wrap="off" autocapitalize="off"
+            autocomplete="off" autocorrect="off" aria-label="policy JSON"></textarea>
+</div>
+<div id="valid" aria-live="polite"></div>
 <div style="margin-top:10px">
   <button id="save" type="button">Save</button>
   <button id="reload" type="button">Reload</button>
@@ -354,8 +403,80 @@ _HTML = """<!doctype html>
   var API = "%API%";
   var etag = null;
   var ta = document.getElementById("policy");
+  var hl = document.getElementById("hl");
+  var validEl = document.getElementById("valid");
   var statusEl = document.getElementById("status");
   function show(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+
+  // JSON has five token types and no ambiguity, so one pass over the text is
+  // the whole grammar. A key is a string followed by a colon, and that
+  // alternative comes first so it wins over the plain-string one.
+  var TOK = /("(?:\\.|[^"\\])*")(\s*:)|("(?:\\.|[^"\\])*")|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+
+  // Escaped BEFORE tokenizing, and quotes are deliberately left alone: inside
+  // element text a bare " is not markup, and turning it into &quot; would stop
+  // the string pattern matching. After this the only tags in the result are the
+  // spans added below, which is what makes assigning to innerHTML safe here.
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function paint() {
+    hl.innerHTML = esc(ta.value).replace(TOK, function (m, key, colon, str, lit, num) {
+      if (key) { return '<span class="k">' + key + "</span>" + colon; }
+      if (str) { return '<span class="s">' + str + "</span>"; }
+      if (lit) { return '<span class="l">' + lit + "</span>"; }
+      return '<span class="n">' + num + "</span>";
+    }) + "\n";           // trailing newline so the last line can scroll into view
+    hl.scrollTop = ta.scrollTop;
+    hl.scrollLeft = ta.scrollLeft;
+  }
+
+  // Where the error is matters more than what colour anything is: the server
+  // refuses a malformed overlay anyway, so the only job here is to say which
+  // character before Save is pressed.
+  // The two engines word this differently and neither is going to change:
+  // V8 says "at position 42", SpiderMonkey says "at line 3 column 27". Parsing
+  // only one of them means the caret silently fails to move in half the
+  // browsers, which is worse than not offering it.
+  function offsetOf(msg, text) {
+    var m = /position (\d+)/.exec(msg);
+    if (m) { return +m[1]; }
+    m = /line (\d+) column (\d+)/.exec(msg);
+    if (m) {
+      var lines = text.split("\n"), off = 0, i;
+      for (i = 0; i < +m[1] - 1 && i < lines.length; i++) { off += lines[i].length + 1; }
+      return off + (+m[2] - 1);
+    }
+    return -1;
+  }
+  function check(moveCaret) {
+    try {
+      JSON.parse(ta.value);
+      validEl.textContent = "";
+      validEl.className = "";
+      return true;
+    } catch (e) {
+      var off = offsetOf(e.message, ta.value);
+      var where = "";
+      if (off >= 0) {
+        if (!/line \d+ column \d+/.test(e.message)) {   // do not repeat what it already said
+          var upto = ta.value.slice(0, off);
+          where = " - line " + upto.split("\n").length +
+                  ", column " + (upto.length - upto.lastIndexOf("\n"));
+        }
+        if (moveCaret) { ta.focus(); ta.setSelectionRange(off, off); }
+      }
+      validEl.textContent = "invalid JSON: " + e.message + where;
+      validEl.className = "err";
+      return false;
+    }
+  }
+  function refresh() { paint(); check(false); }
+  ta.addEventListener("input", refresh);
+  ta.addEventListener("scroll", function () {
+    hl.scrollTop = ta.scrollTop;
+    hl.scrollLeft = ta.scrollLeft;
+  });
   function load() {
     show("loading...");
     fetch(API, { method: "GET", headers: { "Accept": "application/json" } })
@@ -363,14 +484,14 @@ _HTML = """<!doctype html>
       .then(function (d) {
         etag = d.etag;
         ta.value = JSON.stringify(d.policy, null, 2);
+        refresh();
         show("loaded (etag " + etag + "). Registered tools: " + d.tools.join(", "), "ok");
       })
       .catch(function (e) { show("load failed: " + e.message, "err"); });
   }
   function save() {
-    var parsed;
-    try { parsed = JSON.parse(ta.value); }
-    catch (e) { show("not valid JSON: " + e.message, "err"); return; }
+    if (!check(true)) { show("not valid JSON - the caret is on it", "err"); return; }
+    var parsed = JSON.parse(ta.value);
     show("saving...");
     fetch(API, {
       method: "PUT",
@@ -382,6 +503,7 @@ _HTML = """<!doctype html>
       if (res.status === 200) {
         etag = res.body.etag;
         ta.value = JSON.stringify(res.body.policy, null, 2);
+        refresh();
         show("saved. new etag " + etag, "ok");
       } else if (res.status === 412) {
         etag = res.body.etag;
