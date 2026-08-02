@@ -348,7 +348,11 @@ _HTML = r"""<!doctype html>
      the glyphs, which is why they share one rule and why wrapping is off:
      soft wrap in a textarea is not reproducible in a <pre> without guessing at
      the same break points. */
-  .editor { position: relative; height: 340px; }
+  /* Scales with the window rather than sitting at a fixed height: the policy
+     grows a line per tool, and a box that fits one screen is a scrollbar on
+     the next. The floor keeps it usable on a laptop, the ceiling stops a tall
+     monitor from putting the buttons somewhere you have to hunt for them. */
+  .editor { position: relative; height: clamp(340px, 68vh, 1000px); }
   .editor > * {
     position: absolute; inset: 0; margin: 0; width: 100%; height: 100%;
     box-sizing: border-box; padding: 6px; border: 1px solid #767676;
