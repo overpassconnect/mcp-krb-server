@@ -397,6 +397,12 @@ page only), create the state dir, and restart. The admin's browser must trust th
 host for Integrated Auth (as it must to reach the server at all). View at
 `https://mcp.example.internal/admin/authz`.
 
+On a workstation that is not joined to the realm, a browser has no ticket to
+answer the challenge with and will prompt in a loop no matter what is typed;
+run the browser where the credential is (client/README.md, "Reaching a
+Kerberos-only web page from Windows"), or drive `/admin/authz.json` with
+`curl --negotiate` and skip the browser entirely.
+
 ### [C6] Bound unauthenticated work
 Status: fixed. Oversized/garbage tokens rejected before crypto; nginx rate/conn
 limits; 1 MB body cap.

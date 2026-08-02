@@ -573,6 +573,74 @@ files (it does not for `-F`).
 Tickets expire and VS Code reconnects silently, so an expired ticket looks like
 the extension breaking. Run `wsl kinit -R`.
 
+### Reaching a Kerberos-only web page from Windows
+
+A Windows browser cannot do this, and the failure is misleading enough to be
+worth stating plainly: you get an authentication dialog, you type the correct
+password, and the dialog comes straight back. Forever.
+
+Nothing is wrong with the password. SPNEGO never uses one. The browser is meant
+to answer the `WWW-Authenticate: Negotiate` challenge with a ticket from the
+operating system's credential cache, and a workstation that is not joined to
+the realm has no such ticket. Windows' own cache is empty, your tickets live
+inside WSL, and a Windows process cannot see them. With nothing to answer with,
+the browser falls back to prompting; what you type goes up as Basic or NTLM,
+both of which the server refuses because it pins krb5; and you get a fresh 401.
+
+So run the browser where the ticket is:
+
+```sh
+# inside WSL. Ubuntu's `firefox` package is only a shim for the snap, which is
+# unreliable there, so take the real .deb from Mozilla's own repository.
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
+  | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
+gpg --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc | grep fpr
+#   expect 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 before going further
+echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
+  | sudo tee /etc/apt/sources.list.d/mozilla.list >/dev/null
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+  | sudo tee /etc/apt/preferences.d/mozilla >/dev/null
+sudo apt-get update && sudo apt-get install -y firefox
+```
+
+Configure it with a policy file rather than per-profile preferences, so it
+survives a new profile and there is one place to read:
+
+```json
+/* /etc/firefox/policies/policies.json */
+{
+  "policies": {
+    "Preferences": {
+      "network.negotiate-auth.trusted-uris": {
+        "Value": ".example.internal", "Status": "locked"
+      }
+    },
+    "Certificates": { "Install": ["/usr/local/share/ca-certificates/ipa-ca.crt"] }
+  }
+}
+```
+
+The certificate line is not optional on Linux: Firefox keeps its own NSS trust
+store and does not read the system one by default, so without it every realm
+host fails TLS.
+
+**Do not set `network.negotiate-auth.delegation-uris`.** That pref forwards your
+TGT to the listed hosts, which is precisely what the rest of this design refuses
+to do.
+
+On Windows 11 the window appears on your desktop through WSLg, with a Start menu
+entry generated from the `.desktop` file. Pin your own shortcut to
+`wslg.exe -d <distro> -- firefox` rather than the generated one: WSL puts that
+shortcut's icon under `%LOCALAPPDATA%\Temp`, and once Temp is cleared a pinned
+copy reports the program as moved or missing.
+
+None of this is needed for pages that offer their own login form; it applies
+only where Kerberos is the sole accepted mechanism. The policy editor is one
+such page, and it also exposes `/admin/authz.json`, so
+`curl --negotiate -u : https://mcp.example.internal/admin/authz.json` reads and
+writes the same policy from a shell with no browser at all.
+
 ## macOS
 
 `setup-macos.sh` is the macOS counterpart to `setup.sh` and `setup.ps1`, with one
