@@ -158,6 +158,14 @@ class EditorApp(unittest.TestCase):
         self.assertEqual(d['policy']['whoami'], authz.ANY_TOKEN)
         self.assertIn('restart_service', d['tools'])
 
+    def test_the_api_reports_the_registered_tools(self):
+        # The sidebar is only as good as this list.
+        s, _, body = run(_call(self.app, 'GET', authz_editor.PATH_API))
+        self.assertEqual(s, 200)
+        tools = json.loads(body)['tools']
+        self.assertIn('restart_service', tools)
+        self.assertEqual(sorted(tools), sorted(set(tools)))
+
     # --- happy-path write --------------------------------------------------
     def test_valid_put_updates_policy_and_persists(self):
         s, h, body = self._put({'list_projects': ['mcp-users', 'mcp-leads']})
@@ -393,6 +401,31 @@ class PageTemplate(unittest.TestCase):
         src = authz_editor._HTML
         self.assertIn(r'/position (\d+)/', src)
         self.assertIn(r'/line (\d+) column (\d+)/', src)
+
+    def test_the_sidebar_scans_rather_than_parses(self):
+        # Half-typed JSON does not parse, and that is precisely when a tool
+        # name is being entered, so a parse-based sidebar would freeze at the
+        # moment it is most useful.
+        src = authz_editor._HTML
+        self.assertIn('function namedInText', src)
+        scan = src[src.index('function namedInText'):src.index('function li(')]
+        self.assertIn('KEY.exec', scan)
+        self.assertNotIn('JSON.parse', scan)
+
+    def test_the_sidebar_is_fed_by_the_api_tool_list(self):
+        # The registered set must come from the server, not a copy in the page
+        # that would drift the moment a tool is added.
+        src = authz_editor._HTML
+        self.assertIn('TOOLS = (d.tools || [])', src)
+        self.assertIn('id="t-on"', src)
+        self.assertIn('id="t-off"', src)
+        self.assertIn('id="t-bad"', src)
+
+    def test_save_is_disabled_while_the_json_is_invalid(self):
+        src = authz_editor._HTML
+        self.assertIn('saveBtn.disabled = !check(false);', src)
+        # A failed load leaves an empty box; Save must not be live over it.
+        self.assertIn('saveBtn.disabled = true;', src)
 
     def test_the_page_carries_no_external_asset(self):
         # default-src 'none' would block them anyway; this catches the mistake

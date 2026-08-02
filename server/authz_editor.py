@@ -332,7 +332,29 @@ _HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MCP authz policy editor</title>
 <style nonce="%NONCE%">
-  body { font: 14px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 1180px; margin: 2rem auto; padding: 0 1rem; }
+  .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+
+  /* Which tools the overlay actually names. A tool absent from the JSON keeps
+     its reviewed in-code default, which is easy to forget when looking at a
+     document that simply does not mention it. */
+  #tools { height: clamp(340px, 68vh, 1000px); overflow: auto; box-sizing: border-box;
+           border: 1px solid #767676; padding: 10px; font-size: 12px; }
+  #tools h2 { font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+              color: #555; margin: 0 0 6px; font-weight: 600; }
+  #tools h2 + ul { margin: 0 0 14px; }
+  #tools ul { list-style: none; margin: 0; padding: 0; }
+  #tools li { display: flex; gap: 7px; align-items: flex-start; padding: 2px 0; }
+  #tools li.hit { cursor: pointer; border-radius: 3px; }
+  #tools li.hit:hover { background: #eef3fb; }
+  .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .on { background: #0550ae; }
+  .off { box-shadow: inset 0 0 0 1px #9a9a9a; }
+  .bad { background: #b00020; }
+  .tname { font-family: ui-monospace, monospace; word-break: break-all; }
+  .tval { display: block; color: #666; font-size: 11px; font-family: ui-monospace, monospace; }
+  .empty { color: #777; font-style: italic; }
   h1 { font-size: 1.25rem; }
   .meta { color: #555; font-size: 12px; margin-bottom: 1rem; }
   button { font-size: 14px; padding: 6px 14px; margin-right: 8px; }
@@ -380,7 +402,15 @@ _HTML = r"""<!doctype html>
     .k { color: #79c0ff; } .s { color: #7ee787; }
     .n { color: #ffa657; } .l { color: #d2a8ff; }
     .ok { color: #3fb950; } .err { color: #ff7b72; }
+    #tools { border-color: #30363d; }
+    #tools h2 { color: #8b949e; }
+    #tools li.hit:hover { background: #161b22; }
+    .on { background: #79c0ff; } .off { box-shadow: inset 0 0 0 1px #6e7681; }
+    .bad { background: #ff7b72; }
+    .tval, .empty { color: #8b949e; }
+    button:disabled { opacity: .5; }
   }
+  button:disabled { cursor: not-allowed; opacity: .55; }
 </style>
 </head>
 <body>
@@ -391,12 +421,24 @@ _HTML = r"""<!doctype html>
   or <code>"%ANYTOKEN%"</code> for any authenticated principal. Only registered
   tools are accepted; omitted tools keep their reviewed code default.
 </div>
-<div class="editor">
-  <pre id="hl" aria-hidden="true"></pre>
-  <textarea id="policy" spellcheck="false" wrap="off" autocapitalize="off"
-            autocomplete="off" autocorrect="off" aria-label="policy JSON"></textarea>
+<div class="wrap">
+  <div>
+    <div class="editor">
+      <pre id="hl" aria-hidden="true"></pre>
+      <textarea id="policy" spellcheck="false" wrap="off" autocapitalize="off"
+                autocomplete="off" autocorrect="off" aria-label="policy JSON"></textarea>
+    </div>
+    <div id="valid" aria-live="polite"></div>
+  </div>
+  <aside id="tools" aria-label="registered tools">
+    <h2>Named in the policy</h2>
+    <ul id="t-on"></ul>
+    <h2>Using their code default</h2>
+    <ul id="t-off"></ul>
+    <h2 id="t-bad-h" hidden>Not registered - PUT will be refused</h2>
+    <ul id="t-bad"></ul>
+  </aside>
 </div>
-<div id="valid" aria-live="polite"></div>
 <div style="margin-top:10px">
   <button id="save" type="button">Save</button>
   <button id="reload" type="button">Reload</button>
@@ -475,7 +517,103 @@ _HTML = r"""<!doctype html>
       return false;
     }
   }
-  function refresh() { paint(); check(false); }
+  // --- the tool sidebar --------------------------------------------------
+  var TOOLS = [];                       // registered in code, from the API
+  var onEl = document.getElementById("t-on");
+  var offEl = document.getElementById("t-off");
+  var badEl = document.getElementById("t-bad");
+  var badHead = document.getElementById("t-bad-h");
+  var saveBtn = document.getElementById("save");
+
+  // Keys are found by scanning, not by parsing. Half-typed JSON does not parse,
+  // and that is exactly when a name is being entered, so parsing would freeze
+  // the sidebar at the moment it is most useful. The policy schema is flat -
+  // tool to array of group strings - so a quoted token followed by a colon is
+  // a tool name and nothing else can be.
+  var KEY = /"((?:\\.|[^"\\])*)"\s*:/g;
+  function namedInText() {
+    var found = Object.create(null), m;
+    KEY.lastIndex = 0;
+    while ((m = KEY.exec(ta.value)) !== null) { found[m[1]] = true; }
+    return found;
+  }
+  function li(name, cls, detail) {
+    var el = document.createElement("li");
+    var dot = document.createElement("span");
+    dot.className = "dot " + cls;
+    var body = document.createElement("span");
+    var n = document.createElement("span");
+    n.className = "tname";
+    n.textContent = name;
+    body.appendChild(n);
+    if (detail) {
+      var d = document.createElement("span");
+      d.className = "tval";
+      d.textContent = detail;
+      body.appendChild(d);
+    }
+    el.appendChild(dot);
+    el.appendChild(body);
+    return el;
+  }
+  function jumpTo(name) {
+    // The quotes are part of the search so a group named the same as a tool
+    // does not win, and the key is selected rather than just scrolled to.
+    var needle = '"' + name + '"';
+    var at = ta.value.indexOf(needle);
+    if (at < 0) { return; }
+    ta.focus();
+    ta.setSelectionRange(at, at + needle.length);
+    paint();
+  }
+  function renderTools() {
+    var named = namedInText();
+    // The value is only knowable when the document parses; the membership is
+    // always knowable. Showing one without the other beats showing neither.
+    var parsed = null;
+    try { parsed = JSON.parse(ta.value); } catch (e) { parsed = null; }
+
+    onEl.textContent = "";
+    offEl.textContent = "";
+    badEl.textContent = "";
+    var nOn = 0, nOff = 0;
+    TOOLS.forEach(function (t) {
+      if (named[t]) {
+        var v = parsed && Object.prototype.hasOwnProperty.call(parsed, t) ? parsed[t] : null;
+        var detail = v === null ? "" : (Array.isArray(v) ? v.join(", ") : String(v));
+        var row = li(t, "on", detail);
+        row.className = "hit";
+        row.addEventListener("click", function () { jumpTo(t); });
+        onEl.appendChild(row);
+        nOn++;
+      } else {
+        offEl.appendChild(li(t, "off", ""));
+        nOff++;
+      }
+    });
+    if (!nOn) { onEl.appendChild(li("none yet", "off", "")); onEl.firstChild.className = "empty"; }
+    if (!nOff) { offEl.appendChild(li("none", "off", "")); offEl.firstChild.className = "empty"; }
+
+    // A name that is not a registered tool makes the server refuse the whole
+    // PUT, so it is worth surfacing while it is still being typed.
+    var unknown = Object.keys(named).filter(function (k) { return TOOLS.indexOf(k) < 0; });
+    badHead.hidden = unknown.length === 0;
+    unknown.forEach(function (k) {
+      var row = li(k, "bad", "");
+      row.className = "hit";
+      row.addEventListener("click", function () { jumpTo(k); });
+      badEl.appendChild(row);
+    });
+  }
+
+  function refresh() {
+    paint();
+    // Save is disabled while the document does not parse: the server would
+    // reject it anyway, and a button that submits nothing is worse than one
+    // that says it cannot.
+    saveBtn.disabled = !check(false);
+    renderTools();
+  }
   ta.addEventListener("input", refresh);
   ta.addEventListener("scroll", function () {
     hl.scrollTop = ta.scrollTop;
@@ -487,11 +625,12 @@ _HTML = r"""<!doctype html>
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) {
         etag = d.etag;
+        TOOLS = (d.tools || []).slice().sort();
         ta.value = JSON.stringify(d.policy, null, 2);
         refresh();
-        show("loaded (etag " + etag + "). Registered tools: " + d.tools.join(", "), "ok");
+        show("loaded (etag " + etag + ")", "ok");
       })
-      .catch(function (e) { show("load failed: " + e.message, "err"); });
+      .catch(function (e) { saveBtn.disabled = true; show("load failed: " + e.message, "err"); });
   }
   function save() {
     if (!check(true)) { show("not valid JSON - the caret is on it", "err"); return; }
@@ -517,7 +656,7 @@ _HTML = r"""<!doctype html>
       }
     }).catch(function (e) { show("save failed: " + e.message, "err"); });
   }
-  document.getElementById("save").addEventListener("click", save);
+  saveBtn.addEventListener("click", save);
   document.getElementById("reload").addEventListener("click", load);
   load();
 })();
