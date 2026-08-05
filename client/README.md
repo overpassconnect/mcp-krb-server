@@ -13,7 +13,7 @@ anywhere.
 | File | What | Fetched by |
 |---|---|---|
 | `setup.sh` | Linux: enrol in FreeIPA, then install the MCP client | a human |
-| `setup.ps1` | Windows: WSL2 Kerberos, and optionally the MCP bridge | a human, or MDM |
+| `setup.ps1` | Windows: WSL2 Kerberos SSH, VS Code Remote-SSH, and the MCP bridge | a human, or MDM |
 | `install-bridge.sh` | install the MCP bridge only | `setup.sh`, `setup.ps1`, or a human |
 | `JsoncEdit.ps1` | helper used by `setup.ps1` | `setup.ps1` |
 | `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
@@ -645,8 +645,8 @@ writes the same policy from a shell with no browser at all.
 
 `setup-macos.sh` is the macOS counterpart to `setup.sh` and `setup.ps1`, with one
 structural difference: a Mac never joins the realm. There is no
-`ipa-client-install` for it, so the script configures the Kerberos client, SSH, the
-optional realm CA and the MCP bridge, and stops there. The realm never learns the
+`ipa-client-install` for it, so the script configures the Kerberos client, SSH, the MCP
+bridge, and the realm CA if that is switched on, then stops there. The realm never learns the
 machine exists, which is why macOS genuinely leaves FreeIPA untouched where Linux
 does not.
 

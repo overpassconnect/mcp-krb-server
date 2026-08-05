@@ -223,9 +223,8 @@ sudo sh install-bridge.sh \
     WSL distro needs it. If a distro already exists that step is skipped, but start elevated
     anyway so the run does not stop halfway.</p>
 
-    <h3>Kerberos SSH only</h3>
-    <p class="note">One file, nothing else to download. This is what most people want. The realm
-    values below are already filled in for you, so the only thing to edit is your username.</p>
+    <p class="note">One command, one file to download. The realm values below are already filled
+    in for you, so the only thing to edit is your username.</p>
     <div class="fill" data-fill="win-cmd">
       <label>Your IPA username
         <input type="text" autocomplete="off" spellcheck="false"
@@ -239,44 +238,26 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
 
 .\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
     -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
-    -SkipVSCode</code></pre>
+    -BaseUrl __BASE__ -McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__</code></pre>
+    <p class="note">That sets up all three pieces: Kerberos SSH through WSL2, VS Code Remote-SSH
+    with <code>remote.SSH.path</code> pointed at a dispatcher so <code>*.__DOMAIN__</code> goes
+    through WSL while every other host keeps using the native Windows <code>ssh</code>, and the
+    MCP bridge. One profile, both worlds, nothing to run afterwards.</p>
+
     <p class="note">Afterwards, in a <em>new</em> terminal:
     <code>wsl kinit &lt;your-ipa-username&gt;@__REALM__</code>, then
     <code>wslssh host.__DOMAIN__</code>. Your existing <code>ssh</code>, keys, host aliases and
     <code>known_hosts</code> are left untouched: the script adds <code>wslssh</code> rather than
     hijacking <code>ssh</code>. Tickets last 24 hours and renew with <code>wsl kinit -R</code>.</p>
 
-    <h3>With VS Code Remote-SSH</h3>
-    <p class="note">Drop <code>-SkipVSCode</code> and the script also points VS Code's
-    <code>remote.SSH.path</code> at a dispatcher, so <code>*.__DOMAIN__</code> goes through WSL
-    and every other host keeps using the native Windows <code>ssh</code>. One profile, both
-    worlds. This is the only step that needs <code>JsoncEdit.ps1</code>, so either put that file
-    next to <code>setup.ps1</code> or pass <code>-BaseUrl</code> and let the script fetch it.</p>
-    <div class="fill" data-fill="win-cmd-code">
-      <label>Your IPA username
-        <input type="text" autocomplete="off" spellcheck="false"
-               data-token="&lt;your-ipa-username&gt;"
-               placeholder="jdoe">
-      </label>
-    </div>
-<pre><code id="win-cmd-code"># Run PowerShell as Administrator.
-$base = "__BASE__"
-iwr -useb "$base/setup.ps1" -OutFile setup.ps1
+    <p class="note">Take <code>-CaSha256</code> from <code>sha256sum /etc/ipa/ca.crt</code> on an
+    enrolled host, or from IT, rather than the copy printed on this page. It is what makes the
+    download verifiable, and a hash read from the same page it is meant to verify proves
+    nothing.</p>
 
-.\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
-    -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
-    -BaseUrl __BASE__</code></pre>
-
-    <h3>Optional: the MCP bridge</h3>
-    <p class="note">Only if you have been asked to run it. Add
-    <code>-McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__</code> to either command above, and
-    <code>-BaseUrl __BASE__</code> as well <em>only to the first one</em>: the second already
-    passes <code>-BaseUrl</code>, and PowerShell refuses a parameter given twice.
-    All three are needed together: <code>-BaseUrl</code> is where the installer is fetched from,
-    <code>-McpUrl</code> is the API the bridge talks to, and the CA hash is what makes that fetch
-    verifiable. Take the hash from <code>sha256sum /etc/ipa/ca.crt</code> on any enrolled host,
-    or from IT, rather than trusting the copy printed here. Without <code>-McpUrl</code> the
-    workstation is SSH-only and nothing MCP-related is installed.</p>
+    <p class="note">Escape hatches, and not the normal path: <code>-SkipVSCode</code> leaves
+    editor settings alone, <code>-SkipMcp</code> installs SSH only. Both are for machines that
+    genuinely should not have those pieces.</p>
 
     <p class="note">The script downloads over TLS and that is the whole of the assurance: there
     is no signature and nothing to verify by hand. A host that serves these files and is
