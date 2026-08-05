@@ -537,7 +537,7 @@ server/          # the MCP server (official SDK)
     mcp-server.service, nginx-mcp.nginx
 client/          # everything that runs on a workstation
   setup.sh           - Linux: enroll in FreeIPA, then install the MCP client
-  setup.ps1          - Windows: WSL2 Kerberos SSH, VS Code Remote-SSH, MCP bridge
+  setup.ps1          - Windows: WSL2 Kerberos SSH, VS Code Remote-SSH, Firefox-in-WSL, MCP bridge
   install-bridge.sh         - install the client (downloaded over HTTPS, then run; never piped to a shell)
   JsoncEdit.ps1      - helper used by setup.ps1 to edit JSONC config in place
   README.md          - provisioning a Linux or Windows workstation, end to end

@@ -13,7 +13,7 @@ anywhere.
 | File | What | Fetched by |
 |---|---|---|
 | `setup.sh` | Linux: enrol in FreeIPA, then install the MCP client | a human |
-| `setup.ps1` | Windows: WSL2 Kerberos SSH, VS Code Remote-SSH, and the MCP bridge | a human, or MDM |
+| `setup.ps1` | Windows: WSL2 Kerberos SSH, VS Code Remote-SSH, Firefox-in-WSL, and the MCP bridge | a human, or MDM |
 | `install-bridge.sh` | install the MCP bridge only | `setup.sh`, `setup.ps1`, or a human |
 | `JsoncEdit.ps1` | helper used by `setup.ps1` | `setup.ps1` |
 | `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
@@ -587,28 +587,25 @@ inside WSL, and a Windows process cannot see them. With nothing to answer with,
 the browser falls back to prompting; what you type goes up as Basic or NTLM,
 both of which the server refuses because it pins krb5; and you get a fresh 401.
 
-So run the browser where the ticket is:
+So the browser has to run where the ticket is, and **`setup.ps1` does this for
+you**. There is nothing to run by hand: it installs Firefox inside WSL and
+configures it, as part of the same single command that sets up SSH and the
+bridge. `-SkipFirefox` opts out on a machine that has no business browsing.
 
-```sh
-# inside WSL. Ubuntu's `firefox` package is only a shim for the snap, which is
-# unreliable there, so take the real .deb from Mozilla's own repository.
-sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
-  | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
-gpg --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc | grep fpr
-#   expect 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 before going further
-echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
-  | sudo tee /etc/apt/sources.list.d/mozilla.list >/dev/null
-printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-  | sudo tee /etc/apt/preferences.d/mozilla >/dev/null
-sudo apt-get update && sudo apt-get install -y firefox
-```
+What it does, and why each part is there:
 
-Configure it with a policy file rather than per-profile preferences, so it
-survives a new profile and there is one place to read:
+Ubuntu's `firefox` package is a transitional shim for the snap, which is
+unreliable under WSL, so the real `.deb` comes from Mozilla's own APT
+repository. Adding a repository means adding a party that can put root-run code
+on the machine, so the signing key's fingerprint is checked
+(`35BAA0B3…15A3`) **before** the repository is added, and a mismatch deletes the
+key and installs nothing.
+
+Configuration goes in `/etc/firefox/policies/policies.json` rather than
+per-profile preferences, so it survives a new profile and there is one place to
+read when someone asks what this browser is configured to trust:
 
 ```json
-/* /etc/firefox/policies/policies.json */
 {
   "policies": {
     "Preferences": {
@@ -616,7 +613,7 @@ survives a new profile and there is one place to read:
         "Value": ".example.internal", "Status": "locked"
       }
     },
-    "Certificates": { "Install": ["/usr/local/share/ca-certificates/ipa-ca.crt"] }
+    "Certificates": { "Install": ["/usr/local/share/ca-certificates/realm-ca.crt"] }
   }
 }
 ```
@@ -625,9 +622,13 @@ The certificate line is not optional on Linux: Firefox keeps its own NSS trust
 store and does not read the system one by default, so without it every realm
 host fails TLS.
 
-**Do not set `network.negotiate-auth.delegation-uris`.** That pref forwards your
-TGT to the listed hosts, which is precisely what the rest of this design refuses
-to do.
+**`network.negotiate-auth.delegation-uris` is deliberately never set.** That pref
+forwards your TGT to the listed hosts, which is precisely what the rest of this
+design refuses to do. A test asserts it stays absent.
+
+Everything above is recorded in the install manifest, so `uninstall.sh` removes
+the package, the repository, its pin and keyring, and the policy file. A machine
+that already had the Mozilla repository keeps it.
 
 On Windows 11 the window appears on your desktop through WSLg, with a Start menu
 entry generated from the `.desktop` file. Pin your own shortcut to

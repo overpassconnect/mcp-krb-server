@@ -85,6 +85,63 @@ class TestEverythingInstalledCanBeRemoved(unittest.TestCase):
                             "would refuse to remove it" % m.group(2))
 
 
+class TestFirefoxProvisioning(unittest.TestCase):
+    """setup.ps1 installs a browser inside WSL, because on Windows there is no
+    other way to answer a Negotiate challenge: the machine holds no ticket
+    outside WSL, so a Windows browser prompts for a password forever.
+    """
+
+    SETUP = (ROOT / "client" / "setup.ps1").read_text(encoding="utf-8")
+
+    def test_delegation_uris_is_never_set(self):
+        # This pref forwards the TGT to the listed hosts. Setting it would undo
+        # the single property the whole design rests on, and it is one word away
+        # from the pref that IS set, so it is worth a test rather than a comment.
+        #
+        # The name appears in a comment saying why it is absent, so assert on the
+        # dict-key form that would actually set it, not on the mention.
+        self.assertIn("'network.negotiate-auth.trusted-uris':", self.SETUP)
+        self.assertNotIn("'network.negotiate-auth.delegation-uris':", self.SETUP)
+
+    def test_the_signing_key_is_pinned_and_checked_before_use(self):
+        # Adding an APT repo is adding a party that can put root-run code on the
+        # machine. The fingerprint has to be verified before the repo exists,
+        # not after.
+        self.assertIn("35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3", self.SETUP)
+        blk = self.SETUP[self.SETUP.index("ff_step() {"):self.SETUP.index("ff_step\n")]
+        check = blk.index("FF-KEY-MISMATCH")
+        add_repo = blk.index("sources.list.d/mozilla.list")
+        self.assertLess(check, add_repo,
+                        "the repository is added before the key is verified")
+        self.assertIn("rm -f /etc/apt/keyrings/packages.mozilla.org.asc", blk,
+                      "a mismatched key must not be left on disk")
+
+    def test_it_can_be_skipped(self):
+        self.assertIn("$SkipFirefox", self.SETUP)
+
+    def test_everything_it_creates_can_be_uninstalled(self):
+        # The same parity rule as the rest of the kit: a path recorded in the
+        # manifest that uninstall.sh does not own is a file that outlives the
+        # kit forever.
+        frag = self.SETUP[self.SETUP.index("if env.get('FF_NEW')"):]
+        frag = frag[:frag.index("doc = {}")]
+        paths = re.findall(r"'(/etc/[^']+)'", frag)
+        self.assertGreaterEqual(len(paths), 4, "expected the repo, pin, keyring and policy dir")
+        block = UNINSTALL[UNINSTALL.index("path_is_ours()"):UNINSTALL.index('if [ "$YES" = 1 ]')]
+        for p in paths:
+            with self.subTest(path=p):
+                stem = p.rsplit("/", 1)[0]
+                self.assertTrue(p in block or (stem + "/*") in block,
+                                "%s is created but uninstall.sh would refuse to remove it" % p)
+
+    def test_the_policy_is_written_as_real_json(self):
+        # Hand-built JSON in a shell heredoc is how a policy file ends up
+        # syntactically valid but semantically empty, and Firefox ignores a
+        # malformed one silently.
+        blk = self.SETUP[self.SETUP.index("ff_step() {"):self.SETUP.index("ff_step\n")]
+        self.assertIn("json.dump", blk)
+
+
 class TestMacOsInstallsTheSameKit(unittest.TestCase):
 
     def test_macos_fetches_every_bridge_file(self):

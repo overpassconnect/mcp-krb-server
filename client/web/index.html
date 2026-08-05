@@ -255,9 +255,15 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     download verifiable, and a hash read from the same page it is meant to verify proves
     nothing.</p>
 
+    <p class="note">It also installs Firefox inside WSL. That is not a preference: Windows holds
+    no Kerberos ticket, so a Windows browser can never answer a <code>Negotiate</code> challenge
+    and will ask for your password forever. The one in WSL reads the same ticket your
+    <code>wslssh</code> does, and appears in the Start menu like any other app.</p>
+
     <p class="note">Escape hatches, and not the normal path: <code>-SkipVSCode</code> leaves
-    editor settings alone, <code>-SkipMcp</code> installs SSH only. Both are for machines that
-    genuinely should not have those pieces.</p>
+    editor settings alone, <code>-SkipMcp</code> installs SSH only, <code>-SkipFirefox</code>
+    leaves the browser out. All three are for machines that genuinely should not have those
+    pieces.</p>
 
     <p class="note">The script downloads over TLS and that is the whole of the assurance: there
     is no signature and nothing to verify by hand. A host that serves these files and is

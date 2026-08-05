@@ -94,7 +94,12 @@ param(
     # what turning it on buys and costs. Required for SECURITY.md [D1]
     # on-behalf-of forwarding, pointless otherwise.
     [switch]$Forwardable,
-    [switch]$SkipMcp
+    [switch]$SkipMcp,
+    # Firefox inside WSL. Installed by default because on Windows there is no
+    # alternative: the machine holds no Kerberos ticket outside WSL, so a Windows
+    # browser can never answer a Negotiate challenge and loops on a password
+    # prompt forever. Skip it on a machine that has no business browsing.
+    [switch]$SkipFirefox
 )
 $ErrorActionPreference = 'Stop'
 
@@ -383,6 +388,9 @@ if ($distros.Count -gt 0) {
 # bridge never delegates either way, [CL1].
 $fwd = if ($Forwardable) { 'true' } else { 'false' }
 $caWant = $CaSha256.ToLower()
+# Interpolated into the WSL script below as a literal 1 or 0, so the bash side
+# needs no PowerShell-typed value.
+$skipFf = if ($SkipFirefox) { '1' } else { '0' }
 $bash = @"
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -486,6 +494,72 @@ ca_step() {
   update-ca-certificates >/dev/null 2>&1 && echo CA-OK || echo CA-SKIP
 }
 ca_step || exit 1
+
+# A browser inside WSL. Not a convenience: Windows is not joined to the realm and
+# holds no ticket, so a Windows browser cannot answer a Negotiate challenge at
+# all. It prompts, whatever is typed goes up as Basic or NTLM, the server pins
+# krb5 and refuses, and the dialog returns forever. Running the browser where the
+# credential already lives is the only route.
+#
+# Ubuntu's `firefox` package is a transitional shim for the snap, which is
+# unreliable under WSL, so this takes the real .deb from Mozilla's own APT
+# repository and checks the signing key fingerprint before trusting it. Every
+# failure below is non-fatal: SSH and the bridge must still come up on a
+# workstation that cannot reach Mozilla.
+ff_new=0
+ff_pkg=''
+ff_step() {
+  [ '$skipFf' = '1' ] && { echo FF-SKIP; return 0; }
+  if ! command -v firefox >/dev/null 2>&1; then
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL --max-time 20 https://packages.mozilla.org/apt/repo-signing-key.gpg \
+      -o /etc/apt/keyrings/packages.mozilla.org.asc || { echo FF-SKIP; return 0; }
+    fpr=`$(gpg --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc 2>/dev/null | awk -F: '/^fpr:/{print `$10; exit}')
+    if [ "`$fpr" != '35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3' ]; then
+      rm -f /etc/apt/keyrings/packages.mozilla.org.asc
+      echo "FF-KEY-MISMATCH `$fpr"
+      return 0
+    fi
+    echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
+    # Without the pin, Ubuntu's snap shim outranks the real package.
+    printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
+    apt-get update -qq >/dev/null 2>&1 || true
+    # p11-kit-modules lets Firefox see the system CA store as well as its own.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq firefox p11-kit-modules >/tmp/firefox-install.log 2>&1 || { echo FF-APT-FAILED; return 0; }
+    ff_new=1
+    ff_pkg='firefox'
+  fi
+  # A policy file rather than per-profile prefs: it survives a new profile, and it
+  # is one place to read when someone asks what this browser is configured to
+  # trust. Written by python so the JSON cannot come out malformed.
+  install -d -m 0755 /etc/firefox/policies
+  FF_URIS='.$Domain' python3 - <<'PYFIREFOX' || { echo FF-POLICY-FAILED; return 0; }
+import json, os
+ca = '/usr/local/share/ca-certificates/realm-ca.crt'
+pol = {
+    # network.negotiate-auth.delegation-uris is DELIBERATELY absent. Setting it
+    # forwards the TGT to those hosts, which is the one thing this whole design
+    # refuses to do. Do not add it.
+    'Preferences': {
+        'network.negotiate-auth.trusted-uris': {
+            'Value': os.environ['FF_URIS'], 'Status': 'locked',
+        },
+    },
+    'DisableTelemetry': True,
+    'DisableFirefoxStudies': True,
+}
+# Firefox keeps its own NSS trust store and does not read the system one by
+# default, so the realm CA has to be handed to it explicitly or every internal
+# host fails TLS.
+if os.path.exists(ca):
+    pol['Certificates'] = {'ImportEnterpriseRoots': True, 'Install': [ca]}
+with open('/etc/firefox/policies/policies.json', 'w') as fh:
+    json.dump({'policies': pol}, fh, indent=2)
+PYFIREFOX
+  echo FF-OK
+}
+ff_step
+
 # Record what this run changed, into the WSL-side manifest that uninstall.sh
 # reads. Same merge rules as install-bridge.sh's merge_manifest; duplicated
 # here because this step runs before that script has been fetched, and on an
@@ -493,6 +567,7 @@ ca_step || exit 1
 # works today, it just cannot be cleanly uninstalled, which the caller warns
 # about on the marker.
 REPLACED="`$replaced" CA_NEW="`$ca_new" OPTDIR_NEW="`$optdir_new" \
+FF_NEW="`$ff_new" FF_PKG="`$ff_pkg" \
 INSTALLED="`$need" PRESENT="`$present" python3 - <<'PYMANIFEST' || echo MANIFEST-SKIP
 import json, os
 path = '/opt/mcp-krb/install-manifest.json'
@@ -512,6 +587,18 @@ else:
     frag['created'].append('/etc/krb5.conf')
 if env.get('CA_NEW') == '1':
     frag['created'].append('/usr/local/share/ca-certificates/realm-ca.crt')
+# The policy file is rewritten on every run, so it is ours whether or not the
+# package was installed this time. The repo, pin and keyring only exist if this
+# run added them, which is what FF_NEW records.
+if os.path.exists('/etc/firefox/policies/policies.json'):
+    frag['created'].append('/etc/firefox/policies/policies.json')
+if env.get('FF_NEW') == '1':
+    frag['created'] += ['/etc/apt/sources.list.d/mozilla.list',
+                        '/etc/apt/preferences.d/mozilla',
+                        '/etc/apt/keyrings/packages.mozilla.org.asc']
+    frag['created_dirs'].append('/etc/firefox/policies')
+if env.get('FF_PKG'):
+    frag['packages_installed'] = frag['packages_installed'] + env['FF_PKG'].split()
 doc = {}
 if os.path.exists(path):
     try:
@@ -564,6 +651,29 @@ if ($wslStep2 -contains 'CA-UNPINNED') {
     Warn 'Pass -CaSha256 <sha256sum of /etc/ipa/ca.crt, taken from any enrolled host>.'
 } elseif ($wslStep2 -contains 'CA-SKIP') {
     Warn "realm CA endpoint unreachable (http://$Kdc/ipa/config/ca.crt). SSH works; HTTPS to internal hosts will not until this is installed."
+}
+# Firefox is the only browser on a Windows workstation that can answer a
+# Negotiate challenge, so a failure here is worth naming rather than swallowing.
+if ($wslStep2 -contains 'FF-OK') {
+    Say "Firefox: installed in WSL, trusted-uris locked to .$Domain (open it from the Start menu)"
+} elseif ($wslStep2 -contains 'FF-SKIP' -and $SkipFirefox) {
+    Say 'Firefox: skipped (-SkipFirefox)'
+} else {
+    $ffKey = @($wslStep2 | Where-Object { $_ -like 'FF-KEY-MISMATCH*' })
+    if ($ffKey) {
+        Warn "Firefox NOT installed: Mozilla's signing key did not match the expected fingerprint ($ffKey)."
+        Warn 'The repository was not added. Nothing was installed from it.'
+    } elseif ($wslStep2 -contains 'FF-APT-FAILED') {
+        Warn 'Firefox NOT installed: apt failed. See /tmp/firefox-install.log inside WSL.'
+    } elseif ($wslStep2 -contains 'FF-POLICY-FAILED') {
+        Warn 'Firefox installed but its policy file could not be written; Integrated Auth will prompt.'
+    } elseif ($wslStep2 -contains 'FF-SKIP') {
+        Warn 'Firefox NOT installed: could not reach packages.mozilla.org.'
+    }
+    if (-not $SkipFirefox) {
+        Warn "Without it, Kerberos-only web pages cannot be reached from this machine at all:"
+        Warn "a Windows browser holds no ticket and will prompt for a password forever."
+    }
 }
 if ($wslStep2 -contains 'MANIFEST-SKIP') {
     Warn 'WSL: the install manifest could not be updated - uninstall will not know what this run changed inside WSL.'
