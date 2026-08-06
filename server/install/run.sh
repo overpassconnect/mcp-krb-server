@@ -27,7 +27,7 @@ CLIENT_SITE_SECTIONS=""; CLIENT_DOWNLOAD_BASE=""; CLIENT_CA_INSTALL=""; CLIENT_P
 CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
 CERT_MODE="acme"; CERT_PATH=""; WHEELHOUSE=""
-ROTATE_KEYTAB=0; CREATE_IPA_SERVICE=0; DRY_RUN=0; FORCE_UNIT=0
+ROTATE_KEYTAB=0; CREATE_IPA_SERVICE=0; DRY_RUN=0; FORCE_UNIT=0; ENABLE_AUTHZ_EDITOR=0
 
 usage() {
     cat <<'USAGE'
@@ -85,6 +85,11 @@ usage: run.sh [options]
   --rotate-keytab        re-retrieve the keytab (BUMPS THE KVNO, breaks live tickets)
   --create-ipa-service   run `ipa service-add` if the SPN is missing (needs an admin ticket)
   --force-unit           overwrite a locally edited unit instead of aborting
+  --enable-authz-editor  serve the web policy editor. A FLAG, never a site.env
+                         key: it is an authenticated write surface over tool
+                         authorization, so whoever runs the installer must ask
+                         for it, and automation driven from a config file cannot
+                         turn it on. Requires MCP_POLICY_ADMINS in site.env.
   --dry-run              print what would change, mutate nothing
   -h, --help             this text
 
@@ -132,6 +137,7 @@ while [ $# -gt 0 ]; do
         --rotate-keytab)    ROTATE_KEYTAB=1 ;;
         --create-ipa-service) CREATE_IPA_SERVICE=1 ;;
         --force-unit)       FORCE_UNIT=1 ;;
+        --enable-authz-editor) ENABLE_AUTHZ_EDITOR=1 ;;
         --dry-run)          DRY_RUN=1 ;;
         -h|--help)          usage; exit 0 ;;
         *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -1041,6 +1047,89 @@ if [ -n "${MCP_SITE_TOOLS:-}" ]; then
     say "site tools: $MCP_SITE_TOOLS"
 fi
 
+# --- policy editor ----------------------------------------------------------
+# The switch is --enable-authz-editor and deliberately NOT a site.env key. The
+# editor is an authenticated write surface over tool authorization: whoever can
+# reach it can widen who may call what. Keeping the switch in the invocation
+# means a human asked for it, while automation that only supplies a parameter
+# file cannot turn it on. That is the same rule the old assertion enforced by
+# forbidding the line outright; the difference is that the state is now
+# reachable from source instead of only by hand-editing the unit afterwards,
+# which is how the live host ended up unreproducible.
+#
+# The three values below are inert without the switch, so they are ordinary
+# site.env keys.
+MCP_POLICY_ADMINS="${MCP_POLICY_ADMINS:-}"
+MCP_POLICY_FILE="${MCP_POLICY_FILE:-/var/lib/mcp-server/tool-groups.json}"
+MCP_PUBLIC_ORIGIN="${MCP_PUBLIC_ORIGIN:-https://$FQDN}"
+
+case "${MCP_AUTHZ_EDITOR:-}" in
+    ''|0|false|FALSE|no|NO|off|OFF) : ;;
+    *) die "MCP_AUTHZ_EDITOR is set in $SITE_ENV, and it is not settable there.
+  The policy editor is an authenticated write surface over tool authorization, so
+  enabling it is a decision the person running the installer makes, not one a
+  parameter file makes on their behalf. Remove it from site.env and pass
+  --enable-authz-editor instead." ;;
+esac
+
+if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
+    [ -n "$MCP_POLICY_ADMINS" ] || die "--enable-authz-editor needs MCP_POLICY_ADMINS in $SITE_ENV.
+  An editor with no admins is a page that authenticates everyone and authorises
+  nobody, and the only way to find that out is to open it."
+    # Full principals only. A bare username would silently never match, so the
+    # editor would authenticate the right person and refuse them.
+    _rest="$MCP_POLICY_ADMINS"
+    while [ -n "$_rest" ]; do
+        case "$_rest" in
+            *,*) _adm="${_rest%%,*}"; _rest="${_rest#*,}" ;;
+            *)   _adm="$_rest";       _rest= ;;
+        esac
+        _adm="$(printf '%s' "$_adm" | tr -d '[:space:]')"
+        [ -n "$_adm" ] || continue
+        printf '%s' "$_adm" | grep -Eq '^[A-Za-z0-9._-]{1,64}@[A-Z0-9.-]{3,253}$' \
+            || die "MCP_POLICY_ADMINS entry '$_adm' is not a Kerberos principal.
+  Want user@REALM with the realm UPPERCASE, e.g. alice@$REALM."
+        case "$_adm" in
+            *@"$REALM") ;;
+            *) die "MCP_POLICY_ADMINS entry '$_adm' is not in this realm ($REALM).
+  The acceptor only ever sees principals from its own realm, so this could never
+  match and the editor would refuse that person forever." ;;
+        esac
+    done
+
+    sed -i 's/^# *Environment=MCP_AUTHZ_EDITOR=1/Environment=MCP_AUTHZ_EDITOR=1/' \
+        "$RENDER/mcp-server.service"
+    sed -i "s|^# *Environment=MCP_POLICY_ADMINS=.*|Environment=MCP_POLICY_ADMINS=$MCP_POLICY_ADMINS|" \
+        "$RENDER/mcp-server.service"
+    sed -i "s|^# *Environment=MCP_POLICY_FILE=.*|Environment=MCP_POLICY_FILE=$MCP_POLICY_FILE|" \
+        "$RENDER/mcp-server.service"
+    sed -i "s|^# *Environment=MCP_PUBLIC_ORIGIN=.*|Environment=MCP_PUBLIC_ORIGIN=$MCP_PUBLIC_ORIGIN|" \
+        "$RENDER/mcp-server.service"
+    # The policy file lives here, and ProtectSystem=strict makes everything else
+    # read-only. Without the state directory the editor starts, authenticates,
+    # and fails only when someone tries to save.
+    sed -i 's/^# *StateDirectory=mcp-server$/StateDirectory=mcp-server/' \
+        "$RENDER/mcp-server.service"
+    sed -i 's/^# *StateDirectoryMode=0750$/StateDirectoryMode=0750/' \
+        "$RENDER/mcp-server.service"
+
+    for _k in MCP_AUTHZ_EDITOR MCP_POLICY_ADMINS MCP_POLICY_FILE MCP_PUBLIC_ORIGIN; do
+        grep -q "^Environment=$_k=" "$RENDER/mcp-server.service" \
+            || die "--enable-authz-editor was given but the unit template has no
+  '# Environment=$_k=' line to fill in. Refusing to install a unit that would run
+  without the editor while the operator asked for it."
+    done
+    grep -qx 'StateDirectory=mcp-server' "$RENDER/mcp-server.service" \
+        || die "--enable-authz-editor was given but the unit template has no
+  '# StateDirectory=mcp-server' line to uncomment; the editor could not save."
+
+    warn "POLICY EDITOR IS ON at $MCP_PUBLIC_ORIGIN/admin/authz.
+         It is an authenticated WRITE surface over tool authorization: anyone in
+         MCP_POLICY_ADMINS can change which IPA groups may call which tool, and
+         those changes take effect without a deploy. Admins: $MCP_POLICY_ADMINS"
+    say "policy editor: on, admins=$MCP_POLICY_ADMINS, policy=$MCP_POLICY_FILE"
+fi
+
 assert_rendered() {
     f="$1"
     grep -q 'example\.internal' "$f"  && die "rendering left example.internal in $f"
@@ -1061,9 +1150,20 @@ grep -qx "Environment=KRB5_KTNAME=$KEYTAB" "$RENDER/mcp-server.service" \
     || die "rendered unit has no 'Environment=KRB5_KTNAME=$KEYTAB'.
   Without it gssapi looks in the system default keytab and every handshake fails
   with 'MissingCredentialsError'. Check server/install/mcp-server.service."
-# Automation must never be able to switch the policy editor on.
-grep -q '^Environment=MCP_AUTHZ_EDITOR' "$RENDER/mcp-server.service" \
-    && die "rendered unit has an ACTIVE MCP_AUTHZ_EDITOR line; it must stay commented out"
+# Automation must never be able to switch the policy editor on. The rule is
+# unchanged; what changed is that there is now one legitimate way to reach the
+# active state, --enable-authz-editor, which only a person invoking the installer
+# can supply. Anything else that produces an active line, a stray template edit or
+# a sed that matched too much, is still refused here.
+if [ "$ENABLE_AUTHZ_EDITOR" != 1 ]; then
+    grep -q '^Environment=MCP_AUTHZ_EDITOR' "$RENDER/mcp-server.service" \
+        && die "rendered unit has an ACTIVE MCP_AUTHZ_EDITOR line but
+  --enable-authz-editor was not given. The policy editor must never switch itself
+  on. Check server/install/mcp-server.service for an uncommented line."
+    grep -qx 'StateDirectory=mcp-server' "$RENDER/mcp-server.service" \
+        && die "rendered unit has an ACTIVE StateDirectory but the policy editor is
+  off; nothing else needs a writable state directory. Check the template."
+fi
 say "PASS rendered unit passes all assertions"
 
 install_if_changed() {
