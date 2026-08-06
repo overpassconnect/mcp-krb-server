@@ -247,10 +247,6 @@ stale process, a delegation flag half-configured) into a loud one. Full installe
 detail, what `verify.sh` asserts, and what the host serves live in
 [`server/`](server/) and [SECURITY.md](SECURITY.md).
 
-Running any of this inside Proxmox LXC containers has two prerequisites that are
-easy to meet in the wrong order and produce misleading symptoms: see
-[PROXMOX-CONTAINERS.md](PROXMOX-CONTAINERS.md).
-
 ### Provision a workstation
 
 One command per platform, documented end to end in
