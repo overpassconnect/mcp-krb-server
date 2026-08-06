@@ -517,9 +517,25 @@ ca_step || exit 1
 # workstation that cannot reach Mozilla.
 ff_new=0
 ff_pkg=''
+# Test the PACKAGE, not the command name. Ubuntu ships a transitional `firefox`
+# deb whose entire content is /usr/bin/firefox, a shell script that execs the
+# snap. It satisfies `command -v firefox`, so the previous guard skipped this
+# whole block and left the snap in place: precisely what the paragraph above
+# says not to use. It also ships no .desktop file, so WSLg has nothing to
+# publish and the browser never reaches the Start menu.
+#
+# This is the same mistake the krb5-user guard above already documents: testing
+# for *a* binary rather than *the right* package. Written down once and then not
+# carried four lines down the file.
+ff_installed() {
+  case "`$(dpkg-query -W -f='`${Version}' firefox 2>/dev/null)" in
+    ''|*snap*) return 1 ;;
+  esac
+  [ -f /usr/share/applications/firefox.desktop ]
+}
 ff_step() {
   [ '$skipFf' = '1' ] && { echo FF-SKIP; return 0; }
-  if ! command -v firefox >/dev/null 2>&1; then
+  if ! ff_installed; then
     install -d -m 0755 /etc/apt/keyrings
     curl -fsSL --max-time 20 https://packages.mozilla.org/apt/repo-signing-key.gpg \
       -o /etc/apt/keyrings/packages.mozilla.org.asc || { echo FF-SKIP; return 0; }
@@ -532,9 +548,22 @@ ff_step() {
     echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
     # Without the pin, Ubuntu's snap shim outranks the real package.
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
-    apt-get update -qq >/dev/null 2>&1 || true
+    # NOT `|| true`. If the index never refreshed, the install below silently
+    # takes Ubuntu's transitional package instead of Mozilla's and reports
+    # success, which is how a workstation ends up on the snap with every marker
+    # saying the step worked.
+    apt-get update -qq >/dev/null 2>&1 || { echo FF-APT-UPDATE-FAILED; return 0; }
+    # --allow-downgrades because Ubuntu's shim carries epoch 1 and Mozilla's real
+    # package does not, so by version alone the shim looks newer. The pin already
+    # makes Mozilla's the candidate; this lets apt act on that.
     # p11-kit-modules lets Firefox see the system CA store as well as its own.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq firefox p11-kit-modules >/tmp/firefox-install.log 2>&1 || { echo FF-APT-FAILED; return 0; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades firefox p11-kit-modules >/tmp/firefox-install.log 2>&1 || { echo FF-APT-FAILED; return 0; }
+    # Verify rather than assume. Every failure mode above this line is loud; this
+    # one is silent, and it is the one that actually happened.
+    if ! ff_installed; then
+      echo "FF-STILL-SNAP `$(dpkg-query -W -f='`${Version}' firefox 2>/dev/null)"
+      return 0
+    fi
     ff_new=1
     ff_pkg='firefox'
   fi
@@ -674,6 +703,14 @@ if ($wslStep2 -contains 'FF-OK') {
         Warn 'The repository was not added. Nothing was installed from it.'
     } elseif ($wslStep2 -contains 'FF-APT-FAILED') {
         Warn 'Firefox NOT installed: apt failed. See /tmp/firefox-install.log inside WSL.'
+    } elseif ($wslStep2 -contains 'FF-APT-UPDATE-FAILED') {
+        Warn 'Firefox NOT installed: apt-get update failed after adding Mozilla''s repository.'
+        Warn 'Nothing was installed from a stale index, which would have taken Ubuntu''s snap shim.'
+    } elseif (@($wslStep2 | Where-Object { $_ -like 'FF-STILL-SNAP*' })) {
+        $ffVer = @($wslStep2 | Where-Object { $_ -like 'FF-STILL-SNAP*' })
+        Warn "Firefox is still Ubuntu's transitional snap package ($ffVer)."
+        Warn 'Mozilla''s .deb did not replace it. The snap is unreliable under WSL and ships no'
+        Warn '.desktop, so WSLg cannot publish it to the Start menu. See /tmp/firefox-install.log.'
     } elseif ($wslStep2 -contains 'FF-POLICY-FAILED') {
         Warn 'Firefox installed but its policy file could not be written; Integrated Auth will prompt.'
     } elseif ($wslStep2 -contains 'FF-SKIP') {
@@ -682,6 +719,44 @@ if ($wslStep2 -contains 'FF-OK') {
     if (-not $SkipFirefox) {
         Warn "Without it, Kerberos-only web pages cannot be reached from this machine at all:"
         Warn "a Windows browser holds no ticket and will prompt for a password forever."
+    }
+}
+
+# A Start menu entry, because installing a browser nobody can launch is not
+# installing a browser. WSLg publishes GUI apps from the distro's .desktop files,
+# but that is not something to depend on: it did not happen on the machine this
+# was written for, and the failure is silent. Writing the shortcut here makes it
+# a property of the install rather than of WSLg's mood.
+#
+# The name matters as much as the shortcut. A Windows Firefox may well be in the
+# Start menu already, and 'Firefox' next to 'Firefox' is how someone opens the
+# one that cannot authenticate and concludes the realm is broken.
+if ($wslStep2 -contains 'FF-OK' -and -not $SkipFirefox) {
+    $wslgExe = Join-Path $env:ProgramFiles 'WSL\wslg.exe'
+    $distroName = if ($Manifest.wsl_distro) { $Manifest.wsl_distro } else { $distros[0] }
+    if ((Test-Path $wslgExe) -and $distroName) {
+        try {
+            $startPrograms = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+            New-Item -ItemType Directory -Force $startPrograms | Out-Null
+            $lnk = Join-Path $startPrograms 'Firefox (WSL).lnk'
+            $existed = Test-Path $lnk
+            $wsh = New-Object -ComObject WScript.Shell
+            $s = $wsh.CreateShortcut($lnk)
+            $s.TargetPath       = $wslgExe
+            $s.Arguments        = "-d $distroName --cd `"~`" -- firefox"
+            $s.WorkingDirectory = Split-Path $wslgExe -Parent
+            $s.IconLocation     = "$wslgExe,0"
+            $s.Description      = "Firefox inside WSL - the only browser on this machine that can answer a Kerberos Negotiate challenge"
+            $s.Save()
+            if (-not $existed) { $Manifest.created += $lnk }
+            Say 'Start menu: "Firefox (WSL)" added (the plain "Firefox" entry, if any, is the Windows one and cannot authenticate)'
+        } catch {
+            Warn "Firefox is installed in WSL but the Start menu shortcut could not be written: $_"
+            Warn "Launch it with: wsl.exe -d $distroName -- firefox"
+        }
+    } else {
+        Warn "Firefox is installed in WSL but wslg.exe was not found, so no Start menu entry was made."
+        Warn "Launch it with: wsl.exe -d $distroName -- firefox"
     }
 }
 if ($wslStep2 -contains 'MANIFEST-SKIP') {

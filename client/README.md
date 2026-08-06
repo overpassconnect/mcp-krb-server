@@ -831,6 +831,43 @@ SPNEGO initiator against the server's MIT acceptor, the same pairing every Mac
 that SSHes into a FreeIPA realm already exercises daily. Expected to work, not
 yet earned the word "supported".
 
+### Browsers on macOS
+
+This is the one place macOS is easier than Windows. It has a real Kerberos, the
+system Heimdal behind `kinit` and `klist`, so a native browser can answer a
+`Negotiate` challenge with the ticket you already hold. There is no equivalent of
+the Windows problem, where the LSA cache is empty on an unjoined machine and the
+browser has nowhere to read a ticket from. Nothing needs to run inside a VM.
+
+Get a ticket first, then point the browser at the internal URL:
+
+```
+kinit jdoe@EXAMPLE.INTERNAL
+```
+
+| browser | what it needs |
+|---|---|
+| Safari | nothing; it uses the system ticket as it stands |
+| Chrome | `defaults write com.google.Chrome AuthServerAllowlist "*.example.internal"` |
+| Edge | `defaults write com.microsoft.Edge AuthServerAllowlist "*.example.internal"` |
+| Firefox | `network.negotiate-auth.trusted-uris` = `.example.internal`, in `about:config` |
+
+Chrome and Edge are the same engine and the same key under different bundle
+identifiers. Neither has an intranet zone to infer trust from the way Windows
+does, so the allowlist is not optional on either: without it they send nothing
+and the page just keeps asking. Quit and reopen the browser after setting it.
+
+Deliberately absent from all four: any delegation setting. Firefox's
+`network.negotiate-auth.delegation-uris` and the Chromium
+`AuthNegotiateDelegateAllowlist` forward the TGT to the site, which is the one
+thing this design refuses. Trusting a host to receive a service ticket is not the
+same as handing it your identity, and only the first is wanted here.
+
+If a page prompts for a password anyway, it is one of two things and neither is
+the server. `klist` with no ticket means run `kinit`. A TLS error before any
+prompt means the realm CA is not trusted, which `setup-macos.sh` handles with
+`security add-trusted-cert`.
+
 ## The bridge itself
 
 Everything above installs three files from `bridge/`. This section is what the
