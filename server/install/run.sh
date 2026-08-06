@@ -924,6 +924,38 @@ esac
 # on this terminal; caught at import it is a service that will not start, found
 # later by whoever is on call. Same grammar as delegation._targets_from_env().
 if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
+    # Read FORWARDING_TOOLS out of the site tools file, once, before the loop.
+    # ast rather than import: importing would need the MCP SDK and would execute
+    # the file, and this runs before the unit is installed. Tolerates a bare
+    # {...} literal as well as frozenset({...}) and set({...}), because
+    # literal_eval sees the latter two as a Call and refuses them, and dictating
+    # one style to every deployment to suit the parser is the wrong way round.
+    _declared_fwd=''
+    if [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ]; then
+        _declared_fwd="$(/usr/bin/python3 - "$MCP_SITE_TOOLS" <<'PY' 2>/dev/null || true
+import ast, io, sys
+try:
+    tree = ast.parse(io.open(sys.argv[1], encoding='utf-8').read())
+except Exception:
+    raise SystemExit(0)
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == 'FORWARDING_TOOLS'
+            for t in node.targets):
+        v = node.value
+        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
+                and v.func.id in ('frozenset', 'set') and len(v.args) == 1):
+            v = v.args[0]
+        try:
+            for name in sorted(ast.literal_eval(v)):
+                print(name)
+        except Exception:
+            pass
+        break
+PY
+)"
+    fi
+
     # Split on commas without a pipe: `die` inside a `while` fed by a pipeline
     # runs in a subshell, so it would kill only the subshell and the install
     # would carry on past a target it had just rejected.
@@ -958,38 +990,41 @@ if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
         # Look in the site tools file too. A deployment's own forwarding tools
         # live there rather than in mcp_server.py, and checking only the shipped
         # file would refuse every real target a site ever adds.
-        # Two shapes count as forwarding, because both are real. The direct one is
-        # forward_header(ctx, 'tool') written out in the tool body. The indirect one
-        # is a helper that takes the tool name and forwards on its behalf:
+        # Two ways a tool can be shown to forward, and both are exact.
+        #
+        # 1. The literal forward_header(ctx, 'tool') appears. That is how the tools
+        #    shipped in mcp_server.py are written, and it proves a call site.
+        #
+        # 2. The site tools file DECLARES it in FORWARDING_TOOLS.
+        #
+        # The declaration exists because inference does not work here. Matching only
+        # the literal refuses every tool in a file that shares helpers, which is how
+        # any file with more than a couple of forwarding tools is written, since a
+        # fresh Negotiate header is needed per request:
         #
         #     def _get(ctx, tool, path): ... forward_header(ctx, tool) ...
         #     _get(ctx, 'list_docs', ...)
         #
-        # which is how any file with more than a couple of forwarding tools ends up
-        # written, since a fresh Negotiate header is needed per request. Matching
-        # only the literal made this check refuse every such tool as "dead config",
-        # so a site using the helper pattern could not install at all: list_docs,
-        # read_doc and the pull-request tools were all rejected while working
-        # perfectly at runtime.
-        #
-        # The indirect test still catches what this check is for. A typo'd or
-        # retired name appears nowhere in the file, so it fails both arms. What it
-        # gives up is detecting a tool that is named in the file but never actually
-        # forwards, which is a far smaller error than refusing to install a correct
-        # configuration.
+        # and the looser rule that briefly replaced it, "the name appears somewhere
+        # in a file that forwards", accepts any registered tool at all, because
+        # every tool's name appears in its own register_tool_policy() call. That let
+        # a grant survive for a tool that never forwards: inert immediately, but a
+        # later tool taking that name would silently inherit an unreviewed target.
+        # Refuse it while it is still a typo rather than an inheritance.
         _found=0
-        for _pyf in "$CODEDIR/mcp_server.py" "${MCP_SITE_TOOLS:-}"; do
-            [ -n "$_pyf" ] && [ -f "$_pyf" ] || continue
-            if grep -q "forward_header(ctx, '$_tool')" "$_pyf"; then _found=1; break; fi
-            if grep -q 'forward_header(' "$_pyf" \
-               && grep -qE "['\"]$_tool['\"]" "$_pyf"; then _found=1; break; fi
-        done
+        if grep -q "forward_header(ctx, '$_tool')" "$CODEDIR/mcp_server.py"; then
+            _found=1
+        elif [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ]; then
+            grep -q "forward_header(ctx, '$_tool')" "$MCP_SITE_TOOLS" && _found=1
+            if [ "$_found" = 0 ] && printf '%s' "$_declared_fwd" \
+                 | grep -qx "$_tool"; then _found=1; fi
+        fi
         [ "$_found" = 1 ] \
-            || die "MCP_DELEGATION_TARGETS grants '$_tool' a downstream target, but no
-  tool by that name forwards in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}: the name
-  appears in neither a forward_header(ctx, '$_tool') call nor anywhere in a file
-  that forwards at all. Either the name is a typo, or the grant is dead config.
-  Refusing to install an unused grant."
+            || die "MCP_DELEGATION_TARGETS grants '$_tool' a downstream target, but
+  nothing shows that tool forwards. It is not in a forward_header(ctx, '$_tool')
+  call in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}, and it is not listed in that
+  file's FORWARDING_TOOLS. Either the name is a typo, or the grant is dead config,
+  or the tool forwards and was not declared. Refusing to install an unused grant."
     done
     # '|' as the sed delimiter, not '#': the pattern starts with a literal '#'
     # (the commented line being filled in), which would close the expression.
