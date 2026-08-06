@@ -518,8 +518,9 @@ if [ ! -r "$CODEDIR/authz.py" ]; then
 elif ! command -v python3 >/dev/null 2>&1; then
     skip "python3 not available to read the policy from authz.py"
 else
-    GROUPS="$(MCP_POLICY_FILE="$POLICY_FILE" python3 - "$CODEDIR" 2>"$TMP/gerr" <<'PY'
-import json, os, sys
+    GROUPS="$(MCP_POLICY_FILE="$POLICY_FILE" MCP_SITE_TOOLS_FILE="$(env_val MCP_SITE_TOOLS)" \
+              python3 - "$CODEDIR" 2>"$TMP/gerr" <<'PY'
+import json, os, re, sys
 sys.path.insert(0, sys.argv[1])
 import authz
 
@@ -530,13 +531,35 @@ def collect(mapping):
             continue
         names.update(value)
 
-collect(authz.TOOL_GROUPS)
+# authz.TOOL_GROUPS holds only the tools this repository ships. A deployment's
+# own tools live in MCP_SITE_TOOLS and register themselves at startup, so
+# importing authz alone sees four names while the overlay legitimately carries
+# every tool the server actually publishes. Validating the overlay against the
+# short list then rejected the site's real policy with 'unknown tool: <name>',
+# and the check reported the whole policy unreadable while the running server
+# was applying it perfectly. Read the registrations out of the site file so the
+# known set here matches the one the server builds.
+known = set(authz.TOOL_GROUPS)
+site = os.environ.get('MCP_SITE_TOOLS_FILE', '')
+if site and os.path.exists(site):
+    with open(site, 'r', encoding='utf-8') as fh:
+        known.update(re.findall(r"register_tool_policy\(\s*['\"]([A-Za-z0-9_]+)['\"]",
+                                fh.read()))
+
+# The EFFECTIVE policy, defaults with the overlay merged over the top, which is
+# what the server builds and therefore what actually decides access. Taking the
+# union of both instead would report groups that no longer decide anything: an
+# overlay entry REPLACES the in-code default for that tool, so a placeholder
+# group named only by a shadowed default would be flagged as missing while
+# nothing ever consults it.
+effective = dict(authz.TOOL_GROUPS)
 overlay = os.environ.get('MCP_POLICY_FILE', '')
 if overlay and os.path.exists(overlay):
     # A rejected overlay fails loudly here: the running server is refusing it
     # too, and its groups would be missing from everything below.
     with open(overlay, 'r', encoding='utf-8') as fh:
-        collect(authz.policy_from_json(json.load(fh)))
+        effective.update(authz.policy_from_json(json.load(fh), known_tools=known))
+collect(effective)
 for n in sorted(names):
     print(n)
 PY
