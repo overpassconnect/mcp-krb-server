@@ -398,14 +398,23 @@ export DEBIAN_FRONTEND=noninteractive
 # must clean this distro and not whatever the default happens to be by then
 # (Docker Desktop loves to steal the default), so the manifest records it.
 echo "DISTRO=`$WSL_DISTRO_NAME"
-# Two independent prerequisites: krb5-user provides kinit for SSH, python3-gssapi
-# is what the MCP bridge imports. The previous guard tested kinit only,
-# so a workstation that already had krb5-user skipped the apt step entirely and
-# the bridge later died with 'missing Kerberos support: install python3-gssapi'.
+# Three independent prerequisites: krb5-user provides kinit for SSH,
+# python3-gssapi is what the MCP bridge imports, and git is what `wslgit` runs.
+# The previous guard tested kinit only, so a workstation that already had
+# krb5-user skipped the apt step entirely and the bridge later died with
+# 'missing Kerberos support: install python3-gssapi'.
+#
+# git is needed HERE, not on Windows, because the ticket is here. Windows git
+# cannot clone from the realm at all: its bundled curl has SPNEGO and SSPI
+# compiled in, but SSPI reads the Windows LSA ticket cache, which is empty on a
+# machine that is not realm-joined. The capability is present and the credential
+# is not, so it fails with 'Authentication failed' and reads like a password
+# problem rather than a design constraint.
 need=''
 present=''
 if command -v kinit >/dev/null 2>&1; then present="`$present krb5-user"; else need="`$need krb5-user"; fi
 if python3 -c 'import gssapi' >/dev/null 2>&1; then present="`$present python3-gssapi"; else need="`$need python3-gssapi"; fi
+if command -v git >/dev/null 2>&1; then present="`$present git"; else need="`$need git"; fi
 if [ -n "`$need" ]; then
   apt-get update -qq >/dev/null 2>&1 || true
   # Deliberately unquoted so the package names word-split. The value is
@@ -762,8 +771,20 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|wslgit)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
+# Same reasoning as wslssh, one addition: git is directory-sensitive where ssh is
+# not, so this carries --cd. $PWD is the Windows working directory and wsl.exe
+# translates it, which is what lets the checkout live on the Windows filesystem
+# while the network call happens where the ticket is.
+#
+# Only the verbs that talk to the server need this: clone, fetch, pull, push,
+# ls-remote, submodule update. status/add/commit/diff/log/branch are local and
+# work with the ordinary Windows git, which matters because editors and agents
+# shell out to plain `git` and must keep working. It proxies all of git anyway,
+# so nobody has to memorise that list; using it for local work only costs a
+# round trip.
+$kept += "function wslgit { wsl.exe --cd `"`$PWD`" -e git @args }   # Kerberos git via WSL (setup.ps1)"
 # mcp-fetch runs in WSL because that is where the ticket is, which puts the
 # destination path across a filesystem boundary. A path like C:\tmp\x reaches a
 # WSL process as an ordinary relative filename, backslashes and all, so it would
@@ -775,7 +796,32 @@ $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (set
 # lines and a multi-line definition would leave orphans behind on re-run.
 $kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e mcp-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh and mcp-fetch functions added (your `ssh` is left untouched)'
+Say 'PowerShell: wslssh, wslgit and mcp-fetch functions added (your `ssh` and `git` are left untouched)'
+
+# Windows git defaults to core.autocrlf=true and WSL git to false. With the
+# checkout on the Windows filesystem BOTH act on one worktree, so each sees files
+# the other has touched as modified. Measured, not theorised: after a plain
+# `git checkout -- .` on the Windows side, WSL git reported three files dirty
+# that Windows git called clean. You would chase that for an hour.
+#
+# Pinning the Windows side is the smaller change, since false is already what WSL
+# assumes. Only when it has not been set deliberately: someone who chose `input`
+# knows what they are doing and this must not silently overrule them. The durable
+# per-repository fix is `* text=auto eol=lf` in .gitattributes, which travels with
+# the repo instead of depending on how each workstation was provisioned.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $autocrlf = (& git config --global --get core.autocrlf 2>$null)
+    if ($LASTEXITCODE -ne 0) { $autocrlf = '' }
+    if ([string]::IsNullOrWhiteSpace($autocrlf) -or $autocrlf -eq 'true') {
+        if ($autocrlf) { $Manifest.prior_values['git:core.autocrlf'] = $autocrlf }
+        & git config --global core.autocrlf false
+        Say 'git: core.autocrlf=false on the Windows side, so it agrees with WSL git'
+    } else {
+        Say "git: core.autocrlf left at '$autocrlf' (set deliberately; see client/README)"
+    }
+} else {
+    Say 'git: not on the Windows PATH, so nothing to align (wslgit uses the one in WSL)'
+}
 
 # --- 5. VS Code --------------------------------------------------------------
 # enableDynamicForwarding=false is deliberate. VS Code's default reaches the
@@ -1140,11 +1186,13 @@ Write-Host ''
 Say 'Done. In a NEW terminal:'
 Write-Host "    wsl kinit $IpaUser@$Realm" -ForegroundColor Green
 Write-Host "    wslssh anything.$Domain" -ForegroundColor Green
+Write-Host "    wslgit clone https://git.$Domain/<org>/<repo>.git" -ForegroundColor Green
 if ($mcpDone) {
     Write-Host "    claude mcp list                  # internal-tools should be listed" -ForegroundColor Green
 }
 Write-Host ''
 Say 'Your existing `ssh`, keys, host aliases and known_hosts are untouched.'
+Say 'Use `wslgit` for clone/fetch/pull/push; plain `git` still handles everything local.'
 if ($mcpDone) {
     Say 'MCP calls use the same ticket as SSH: if they start failing, run `wsl kinit -R`.'
 }

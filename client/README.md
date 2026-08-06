@@ -278,9 +278,12 @@ evidence-based S4U2Proxy along with everything else. That is the trade.
 ```
 wsl kinit jdoe@EXAMPLE.INTERNAL     # ~once a week
 wslssh anything.example.internal    # no password
+wslgit clone https://git.example.internal/org/repo.git
 ```
 
-`wsl kinit -R` renews without a password (tickets are 24h, renewable 7d).
+`wsl kinit -R` renews without a password (tickets are 24h, renewable 7d). It
+renews a *live* ticket and cannot revive an expired one, so once it has lapsed
+you need a fresh `kinit`.
 
 Renamed from `kssh`. On a workstation provisioned before the rename, re-running
 `setup.ps1` removes the old `kssh` function and adds `wslssh`. Until it is re-run,
@@ -463,6 +466,109 @@ re-parsed by cmd.exe, so an argument containing `& | < > ^` becomes local comman
 execution. `@args` splats safely with no cmd layer. The `.bat` exists only
 because VS Code's `remote.SSH.path` needs a file on disk, and is not for
 interactive use.
+
+### Why `wslgit` and not `git`
+
+Same reasoning as `wslssh`, and the case against hijacking the name is stronger
+here. Editors, build tools and coding agents all shell out to plain `git`;
+redirecting the name would break every one of them, and would make each local
+operation pay a WSL round trip for nothing.
+
+Only the verbs that talk to a server need a ticket:
+
+| needs `wslgit` | plain `git` is fine |
+|---|---|
+| `clone` `fetch` `pull` `push` | `status` `add` `commit` `diff` `log` |
+| `ls-remote` `remote show` | `branch` `switch` `merge` `rebase` `stash` |
+| `submodule update --init` | everything else local |
+
+The function proxies all of git regardless, so nobody has to memorise that
+table. The rule to teach is "if it talks to the server, `wslgit`", and using it
+for local work merely costs a round trip instead of failing.
+
+It carries `--cd "$PWD"` where `wslssh` does not, because git is
+directory-sensitive. `wsl.exe` translates the Windows working directory, which
+is what allows the checkout to live on the Windows filesystem while the network
+call happens where the ticket is. That combination is the point: the working
+tree stays somewhere Windows tools can reach at full speed, and WSL is only a
+transport.
+
+One caveat for large repositories: `/mnt/c` goes through the 9p bridge and is
+slow. Fine for ordinary source trees, noticeably slow for one with tens of
+thousands of files. If a clone ever feels wrong that is why, and the fix is to
+keep that single repository inside WSL rather than to change the pattern.
+
+### Line endings, when two gits share one worktree
+
+Windows git defaults to `core.autocrlf=true`; git in WSL assumes `false`. With
+the checkout on the Windows filesystem, both operate on the same files and each
+sees the other's work as modifications. After a plain `git checkout -- .` on the
+Windows side:
+
+```
+windows git status : clean
+wsl     git status :  M README.md;  M notes/a.md;  M notes/b.md
+```
+
+Three files phantom-dirty depending only on which git you asked.
+
+`setup.ps1` pins the Windows side to `false` so the two agree, and skips that if
+`core.autocrlf` was set to something deliberate. The durable fix belongs in the
+repository rather than the workstation:
+
+```
+* text=auto eol=lf
+```
+
+in `.gitattributes`. That travels with the repo, so it holds however each clone
+was provisioned.
+
+### When git says `Authentication failed`
+
+```
+$ git clone https://git.example.internal/org/repo.git
+fatal: Authentication failed for 'https://git.example.internal/org/repo.git/'
+```
+
+This is the most common report from a Windows workstation, and the wording sends
+people looking for a password that does not exist. Nothing is misconfigured: the
+command was simply run by Windows git instead of `wslgit`.
+
+It is confusing because git *looks* equipped for the job. The bundled curl
+advertises the right features:
+
+```
+$ curl --version | tr ' ' '\n' | grep -iE 'SPNEGO|GSS|SSPI'
+Kerberos
+SPNEGO
+SSPI
+```
+
+SPNEGO is compiled in. What is missing is the credential. SSPI reads the Windows
+LSA ticket cache, and on a machine that is not joined to the realm that cache is
+empty:
+
+```
+$ klist
+Current LogonId is 0:0x4607b
+Cached Tickets: (0)
+```
+
+`kinit` in WSL fills WSL's own cache, which SSPI cannot see. So the capability is
+present, the ticket is elsewhere, and the request goes out unauthenticated and
+comes back 401.
+
+Confirm the diagnosis in one line, from the same directory:
+
+```
+wslgit ls-remote
+```
+
+If that succeeds, nothing is wrong with the repository, the network or the
+credential. Use `wslgit` for clone, fetch, pull and push.
+
+If it fails too, the ticket itself has expired. `kinit -R` renews a live ticket
+and cannot revive a dead one, so run `wsl kinit <user>@<REALM>` and try again.
 
 ### Why WSL and not Windows' own ssh
 

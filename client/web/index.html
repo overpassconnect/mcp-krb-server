@@ -260,6 +260,17 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     and will ask for your password forever. The one in WSL reads the same ticket your
     <code>wslssh</code> does, and appears in the Start menu like any other app.</p>
 
+    <p class="note">Getting a repository works the same way, through
+    <code>wslgit</code>: <code>wslgit clone https://git.__DOMAIN__/&lt;org&gt;/&lt;repo&gt;.git</code>.
+    The checkout lands on the Windows filesystem where your editor and tools reach it at full
+    speed, and only the network call happens inside WSL. Plain <code>git</code> still handles
+    everything local, so <code>status</code>, <code>commit</code>, <code>diff</code> and
+    <code>log</code> are unchanged; use <code>wslgit</code> for <code>clone</code>,
+    <code>fetch</code>, <code>pull</code> and <code>push</code>. Windows git cannot reach the
+    realm at all, for the same reason a Windows browser cannot: the ticket is in WSL, and it
+    fails with <code>Authentication failed</code>, which reads like a password problem and is
+    not one.</p>
+
     <p class="note">Escape hatches, and not the normal path: <code>-SkipVSCode</code> leaves
     editor settings alone, <code>-SkipMcp</code> installs SSH only, <code>-SkipFirefox</code>
     leaves the browser out. All three are for machines that genuinely should not have those
