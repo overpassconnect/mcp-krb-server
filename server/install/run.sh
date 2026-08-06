@@ -952,15 +952,38 @@ if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
         # Look in the site tools file too. A deployment's own forwarding tools
         # live there rather than in mcp_server.py, and checking only the shipped
         # file would refuse every real target a site ever adds.
+        # Two shapes count as forwarding, because both are real. The direct one is
+        # forward_header(ctx, 'tool') written out in the tool body. The indirect one
+        # is a helper that takes the tool name and forwards on its behalf:
+        #
+        #     def _get(ctx, tool, path): ... forward_header(ctx, tool) ...
+        #     _get(ctx, 'list_docs', ...)
+        #
+        # which is how any file with more than a couple of forwarding tools ends up
+        # written, since a fresh Negotiate header is needed per request. Matching
+        # only the literal made this check refuse every such tool as "dead config",
+        # so a site using the helper pattern could not install at all: list_docs,
+        # read_doc and the pull-request tools were all rejected while working
+        # perfectly at runtime.
+        #
+        # The indirect test still catches what this check is for. A typo'd or
+        # retired name appears nowhere in the file, so it fails both arms. What it
+        # gives up is detecting a tool that is named in the file but never actually
+        # forwards, which is a far smaller error than refusing to install a correct
+        # configuration.
         _found=0
-        grep -q "forward_header(ctx, '$_tool')" "$CODEDIR/mcp_server.py" && _found=1
-        [ "$_found" = 0 ] && [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ] \
-            && grep -q "forward_header(ctx, '$_tool')" "$MCP_SITE_TOOLS" && _found=1
+        for _pyf in "$CODEDIR/mcp_server.py" "${MCP_SITE_TOOLS:-}"; do
+            [ -n "$_pyf" ] && [ -f "$_pyf" ] || continue
+            if grep -q "forward_header(ctx, '$_tool')" "$_pyf"; then _found=1; break; fi
+            if grep -q 'forward_header(' "$_pyf" \
+               && grep -qE "['\"]$_tool['\"]" "$_pyf"; then _found=1; break; fi
+        done
         [ "$_found" = 1 ] \
             || die "MCP_DELEGATION_TARGETS grants '$_tool' a downstream target, but no
-  tool by that name calls forward_header() in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}.
-  Either the name is a typo, or the grant is dead config. Refusing to install an
-  unused grant."
+  tool by that name forwards in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}: the name
+  appears in neither a forward_header(ctx, '$_tool') call nor anywhere in a file
+  that forwards at all. Either the name is a typo, or the grant is dead config.
+  Refusing to install an unused grant."
     done
     # '|' as the sed delimiter, not '#': the pattern starts with a literal '#'
     # (the commented line being filled in), which would close the expression.
