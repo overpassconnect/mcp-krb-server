@@ -83,6 +83,60 @@ Neither has a default. A machine told to install the bridge and not told where t
 fetch it from is an operator error knowable from the command line, so it is
 refused before anything is mutated.
 
+### Site sections: the one part of the page that is not in this repo
+
+`web/index.html` is generic. Everything naming a real host, a real workspace or a
+local convention lives in a separate fragment, named by `CLIENT_SITE_SECTIONS` in
+`site.env`, and is spliced into the page when `run.sh` assembles the bundle. The
+same reasoning as `MCP_SITE_TOOLS`: content that names internal hosts cannot live
+here, and it must not be hand-edited into the served copy either, because the next
+install would overwrite it and nothing would regenerate it.
+
+**The fragment's contract.** It is a sequence of top-level sections, each with an
+`id` and an `<h2>`:
+
+```html
+<section id="proxmox">
+  <h2>Proxmox container</h2>
+  ...
+</section>
+```
+
+The `id` and the `<h2>` are not decoration: `run.sh` derives one nav entry per
+section from them. Inner markup in the `<h2>` is stripped to plain text, with tags
+replaced by a space rather than nothing, so an `<h2>` ending in
+`<span class="tag">IT only</span>` reads "Title IT only" and not "TitleIT only". A
+fragment with no `<section id=...><h2>` is refused rather than silently producing
+a page with no navigation.
+
+**The two markers.** The page carries them, each alone on its own line:
+
+```html
+<!-- site-nav -->
+<!-- site-sections -->
+```
+
+Each must appear on a line of its own, and the matcher anchors to the whole line.
+That is not fussiness. The page's own header comment explains where the markers
+are, in prose, quoting their literal text. With substring matching the first
+replacement landed inside that comment: the injected section ended up commented
+out and invisible, the real markers were untouched, and the nav gained no entry.
+Anchoring to a whole line tells prose *about* a marker apart from the marker.
+
+**What is checked before anything is written.** The fragment must be an absolute
+path, must exist, must be root-owned, and must not be group- or world-writable. It
+must also live **outside** the source tree, because `run.sh` converges that tree on
+this repository's file set and would delete it. The permission checks are there
+because the fragment becomes markup instructing people what to run as root: it is
+treated as code, not decoration.
+
+**Where it happens in the flow.** `assemble_bundle()` copies this repo's
+`client/` files into the bundle directory, calls the injection on the copied
+`index.html`, and `write_config()` then generates `config.js`. The repo's own
+`web/index.html` is never modified. So the rendered page is
+`repo template + site fragment`, produced at install time, and re-running the
+installer reproduces it exactly.
+
 ## Trust model
 
 This is transport security only. There is no signature on anything here, and that
