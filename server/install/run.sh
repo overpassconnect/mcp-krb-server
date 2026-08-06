@@ -1253,6 +1253,47 @@ awk -v blk="$CLIENT_BLOCK" '{
     print
 }' "$RENDER/mcp.conf" > "$RENDER/mcp.conf.tmp" && mv "$RENDER/mcp.conf.tmp" "$RENDER/mcp.conf"
 
+# The policy editor needs its own location, and the reason is subtle enough to
+# state: a location that declares ANY add_header stops inheriting every
+# server-level one, so the /admin/ block restates HSTS and nosniff and
+# deliberately omits CSP. Without the block, /admin/ inherits the server CSP
+# (default-src 'none' with no script-src or style-src) ON TOP of the per-response
+# nonce policy the app emits. Browsers enforce the intersection of multiple CSP
+# headers, so the page arrives complete and renders as a blank white document
+# with no stylesheet and no script, and nothing in any log looks wrong.
+#
+# Tied to the same flag as the unit: switching the editor on in one place and not
+# the other is how it ends up served but unusable.
+if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
+    /usr/bin/python3 - "$RENDER/mcp.conf" <<'PY'
+import re, sys
+p = sys.argv[1]
+lines = open(p).read().split('\n')
+start = end = None
+for i, l in enumerate(lines):
+    if re.match(r'^\s*#\s*location \^~ /admin/ \{', l):
+        start = i
+    if start is not None and re.match(r'^\s*#\s*\}\s*$', l):
+        end = i
+        break
+if start is None or end is None:
+    raise SystemExit("the vhost template has no commented '/admin/' location to "
+                     "enable; server/install/nginx-mcp.nginx has changed shape")
+for i in range(start, end + 1):
+    lines[i] = re.sub(r'^(\s*)#\s?', r'\1', lines[i], count=1)
+open(p, 'w').write('\n'.join(lines))
+PY
+    grep -qE '^\s*location \^~ /admin/ \{' "$RENDER/mcp.conf" \
+        || die "failed to enable the /admin/ location in the rendered vhost."
+    # It must NOT restate CSP, or the intersection problem comes back.
+    awk '/^[[:space:]]*location \^~ \/admin\/ \{/{f=1} f&&/Content-Security-Policy/{print "BAD"} f&&/^[[:space:]]*\}/{f=0}' \
+        "$RENDER/mcp.conf" | grep -q BAD \
+        && die "the /admin/ location sets Content-Security-Policy. It must not: the
+  app emits a per-response nonce policy, and a second header would be intersected
+  with it, leaving the page with no styles and no scripts."
+    say "nginx: /admin/ location enabled (app-supplied nonce CSP, no server CSP)"
+fi
+
 assert_rendered "$RENDER/mcp.conf"
 assert_no_tokens "$RENDER/mcp.conf"
 grep -q 'acme-challenge' "$RENDER/mcp.conf" \
