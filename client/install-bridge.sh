@@ -27,10 +27,12 @@
 # copy. The API host is never assumed to be a download source: the download
 # directory is always named explicitly.
 #
-# What authenticates the bytes: TLS, and nothing else. On an enrolled host
-# /etc/ipa/ca.crt is the realm CA, and the download below is pinned to it with
-# curl --cacert, so only a certificate issued by the realm CA is accepted for
-# the publisher. When the MCP host serves the bundle itself the pin still
+# What authenticates the bytes: TLS, and nothing else. The realm CA is at
+# /etc/ipa/ca.crt on an enrolled Linux host, or at
+# /usr/local/share/ca-certificates/realm-ca.crt on any machine that installed it
+# by hand (every Windows and macOS workstation, since only Linux can enrol), and
+# the download below is pinned to it with curl --cacert, so only a certificate
+# issued by the realm CA is accepted for the publisher. When the MCP host serves the bundle itself the pin still
 # holds: its certificate is issued by the realm CA through the FreeIPA ACME
 # service (verified on a live host). When the pin cannot apply, because the
 # file is missing or the publisher's certificate does not chain to it, the
@@ -186,8 +188,9 @@ while [ $# -gt 0 ]; do
             echo "  --managed   also register the bridge machine-wide in"
             echo "              $MANAGED_FILE."
             echo ""
-            echo "The download is pinned to the realm CA (/etc/ipa/ca.crt) when that"
-            echo "file is present, and warns loudly when it has to fall back to the"
+            echo "The download is pinned to the realm CA (/etc/ipa/ca.crt on an"
+            echo "enrolled Linux host, else /usr/local/share/ca-certificates/realm-ca.crt)"
+            echo "when present, and warns loudly when it has to fall back to the"
             echo "system trust store. There is no signature: whoever can serve"
             echo "--base-url decides what runs as root here and in every Claude"
             echo "Code session on this machine." 
@@ -231,17 +234,30 @@ SUDO=""; [ "$(id -u)" != "0" ] && SUDO="sudo"
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-# Pin the TLS leg to the realm CA, exactly as client/setup.sh does. This host is
-# expected to be IPA-enrolled already, so /etc/ipa/ca.crt is the CA it trusts.
+# Pin the TLS leg to the realm CA. Two locations, because there are two kinds of
+# host. Only a Linux host can be IPA-enrolled, and only then does it have
+# /etc/ipa/ca.crt. Everything else, every Windows and macOS workstation, and any
+# Linux box not enrolled, has the CA installed by hand at
+# /usr/local/share/ca-certificates/realm-ca.crt by setup.ps1/setup.sh. That is
+# the common case for this installer, not an exception. Prefer the enrolled path
+# when present, fall back to the manually-installed one, and only warn when
+# neither exists. Before, this looked solely at /etc/ipa/ca.crt and warned on
+# every non-enrolled machine even though the pinned CA was sitting right there,
+# and the warning went to stderr where a Stop-mode PowerShell caller turned it
+# into a fatal error.
 CURL_CA=""
 CA_PIN_DROPPED=0
 if [ -r /etc/ipa/ca.crt ]; then
     CURL_CA="--cacert /etc/ipa/ca.crt"
+elif [ -r /usr/local/share/ca-certificates/realm-ca.crt ]; then
+    CURL_CA="--cacert /usr/local/share/ca-certificates/realm-ca.crt"
 else
-    echo "WARNING: /etc/ipa/ca.crt is not readable, so the realm CA pin is NOT in" >&2
-    echo "         force for the download below. It falls back to the system trust" >&2
-    echo "         store, where any publicly trusted CA can vouch for the publisher." >&2
-    echo "         Is this machine ipa-client-enrolled?" >&2
+    echo "WARNING: no realm CA found (looked at /etc/ipa/ca.crt and" >&2
+    echo "         /usr/local/share/ca-certificates/realm-ca.crt), so the realm CA" >&2
+    echo "         pin is NOT in force for the download below. It falls back to the" >&2
+    echo "         system trust store, where any publicly trusted CA can vouch for" >&2
+    echo "         the publisher. Install the realm CA first (setup.ps1/setup.sh do" >&2
+    echo "         this with -CaSha256), then re-run." >&2
 fi
 
 # shellcheck disable=SC2086  # CURL_CA is script-literal and must word-split

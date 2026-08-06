@@ -207,7 +207,23 @@ function Invoke-WslScript {
     try {
         Set-Content -Path $tmp -Value ($Script -replace "`r`n", "`n") -Encoding ascii -NoNewline
         $wslPath = '/mnt/' + $tmp.Substring(0, 1).ToLower() + ($tmp.Substring(2) -replace '\\', '/')
-        if ($AsRoot) { $out = wsl -u root -e bash $wslPath } else { $out = wsl -e bash $wslPath }
+        # A WSL step may write a non-fatal warning to stderr (install-bridge.sh
+        # does, on the CA-pin fallback). Windows PowerShell 5.1 wraps a native
+        # command's redirected stderr in an ErrorRecord, and ErrorActionPreference
+        # =Stop then turns that into a terminating error thrown BEFORE the
+        # exit-code check below, discarding a clean run's stdout, including its OK
+        # marker. The caller then saw "no output at all" and failed a step that
+        # had actually succeeded. Relax the preference around the native call and
+        # let $LASTEXITCODE be the sole arbiter, exactly as the claude-CLI calls
+        # below already do. 2>&1 keeps the warning as captured data; the cast
+        # collapses the ErrorRecord lines back to plain strings so the caller's
+        # -contains / -like marker checks match as before.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            if ($AsRoot) { $out = wsl -u root -e bash $wslPath 2>&1 } else { $out = wsl -e bash $wslPath 2>&1 }
+        } finally { $ErrorActionPreference = $prevEap }
+        $out = @($out | ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) { throw "WSL step failed ($LASTEXITCODE): $out" }
         return $out
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
@@ -548,11 +564,17 @@ ff_step() {
     echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
     # Without the pin, Ubuntu's snap shim outranks the real package.
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
-    # NOT `|| true`. If the index never refreshed, the install below silently
-    # takes Ubuntu's transitional package instead of Mozilla's and reports
-    # success, which is how a workstation ends up on the snap with every marker
-    # saying the step worked.
-    apt-get update -qq >/dev/null 2>&1 || { echo FF-APT-UPDATE-FAILED; return 0; }
+    # Tolerate a failing apt-get update, but not blindly: its exit code covers
+    # every repository on the machine, and one unrelated broken PPA (seen live: a
+    # jammy-era yq PPA with no noble Release) would block this install forever.
+    # What this step actually needs is narrower and testable: that apt now
+    # resolves firefox to Mozilla's package rather than Ubuntu's shim. Check that
+    # directly and let everything else on the box be someone else's problem.
+    apt-get update -qq >/dev/null 2>&1 || true
+    candidate=`$(apt-cache policy firefox 2>/dev/null | awk '/Candidate:/{print `$2}')
+    case "`$candidate" in
+      ''|*snap*) echo "FF-NO-CANDIDATE `$candidate"; return 0 ;;
+    esac
     # --allow-downgrades because Ubuntu's shim carries epoch 1 and Mozilla's real
     # package does not, so by version alone the shim looks newer. The pin already
     # makes Mozilla's the candidate; this lets apt act on that.
@@ -703,9 +725,10 @@ if ($wslStep2 -contains 'FF-OK') {
         Warn 'The repository was not added. Nothing was installed from it.'
     } elseif ($wslStep2 -contains 'FF-APT-FAILED') {
         Warn 'Firefox NOT installed: apt failed. See /tmp/firefox-install.log inside WSL.'
-    } elseif ($wslStep2 -contains 'FF-APT-UPDATE-FAILED') {
-        Warn 'Firefox NOT installed: apt-get update failed after adding Mozilla''s repository.'
-        Warn 'Nothing was installed from a stale index, which would have taken Ubuntu''s snap shim.'
+    } elseif (@($wslStep2 | Where-Object { $_ -like 'FF-NO-CANDIDATE*' })) {
+        $ffCand = @($wslStep2 | Where-Object { $_ -like 'FF-NO-CANDIDATE*' })
+        Warn "Firefox NOT installed: after adding Mozilla's repository, apt still resolves firefox to '$ffCand'."
+        Warn 'The Mozilla index did not land, so installing now would take Ubuntu''s snap shim. Nothing was installed.'
     } elseif (@($wslStep2 | Where-Object { $_ -like 'FF-STILL-SNAP*' })) {
         $ffVer = @($wslStep2 | Where-Object { $_ -like 'FF-STILL-SNAP*' })
         Warn "Firefox is still Ubuntu's transitional snap package ($ffVer)."
