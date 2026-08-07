@@ -440,14 +440,65 @@ for outbound authentication, which raises what a stolen keytab is worth under [K
 Turning it on is a deliberate deployment decision. The shipped client does not
 delegate ([CL1]), and the full analysis is [D1] in [SECURITY.md](SECURITY.md).
 
+### What S4U2Proxy is, if you have not met it
+
+Skip this if constrained delegation is familiar. It is the least well known corner
+of Kerberos and the rest of this section is hard to follow without it.
+
+Ordinary Kerberos proves one thing: *I am stergios, and I am talking to this
+service*. It says nothing about that service then talking to a third one on your
+behalf. But that is exactly what is wanted here: the MCP server has to reach Gitea
+**as you**, so Gitea's own permissions and audit log apply to the real person,
+without the MCP server ever holding your password or your TGT.
+
+The naive answer is credential forwarding: you hand the service your TGT and it
+becomes you, everywhere, for the life of the ticket. That is what this design
+refuses, because a single compromised service then owns every user who called it,
+against every service in the realm.
+
+S4U2Proxy, *Service for User to Proxy*, is the KDC feature that does it narrowly:
+
+1. You authenticate to the MCP server normally. That handshake leaves it holding
+   **your service ticket to itself**. That ticket is *evidence* you turned up.
+2. The MCP server returns to the KDC: *here is evidence stergios authenticated to
+   me; give me a ticket to Gitea, on his behalf.*
+3. The KDC checks whether **this service is allowed to delegate to that target**,
+   and issues only if so.
+
+Two properties follow, and they are the whole reason for the design.
+
+**No evidence, no ticket.** The server cannot invent a session for somebody who
+never called it. Its reach is bounded by who actually used it, not by who exists
+in the realm. (The sibling feature S4U2**Self**, "protocol transition", removes
+that bound and lets a keytab mint sessions for arbitrary users. This
+implementation deliberately does not use it; see [D1].)
+
+**The KDC decides, not the service.** Step 3 is enforced by the KDC, so it keeps
+holding even if the service host is fully compromised. It is the only control in
+this design that survives that, which is why it is worth configuring properly
+rather than relying on the server's own `MCP_DELEGATION_TARGETS` list.
+
+In the KDC log a successful one looks like this, and it is worth knowing the shape
+because it is the fastest way to confirm the whole chain works:
+
+```
+HTTP/mcp.example.internal for HTTP/git.example.internal
+    ... CONSTRAINED-DELEGATION s4u-client=stergios@EXAMPLE.INTERNAL
+```
+
 ### Enabling it
 
 Three things have to line up, and the KDC is the only one this repository cannot
 arrange for you.
 
 First, authorise the delegation in FreeIPA, as a realm admin. It is two objects,
-not one: a *target* is a reusable list of services that may be delegated to, and
-a *rule* says which service may use that list.
+not one, and the split trips people up: a *target* is a reusable named list of
+services that may be delegated **to**, and a *rule* says which service may use
+that list. Read a configured pair as one sentence: *this service may act as a
+caller towards these destinations, and nothing else.*
+
+Neither object is exposed in the FreeIPA web UI. There is no Service Delegation
+page; `ipa` or LDAP are the only ways to see or change them.
 
 ```sh
 ipa servicedelegationtarget-add mcp-targets
@@ -466,9 +517,43 @@ success with the rejects in a `failed` field most callers never read, and the
 first symptom is a runtime `KDC_ERR_BADOPTION` that `_explain()` cannot
 distinguish from a missing rule.
 
-Verify with `ipa servicedelegationrule-show mcp-delegation`. A host principal
-cannot read these objects, so checking from the MCP host itself returns an empty
-result rather than an error.
+Verify with `ipa servicedelegationrule-show mcp-delegation`, **as a realm admin**.
+
+That emphasis is the single most expensive thing on this page to get wrong.
+Reading these objects needs the `System: Read Service Delegations` permission,
+carried by the **Service Administrators** privilege, which an ordinary user does
+not hold. LDAP ACIs *hide* entries rather than refusing them, so an unprivileged
+`ipa servicedelegationrule-find` returns:
+
+```
+------------------------------
+0 service delegation rules matched
+------------------------------
+```
+
+on a realm where delegation is fully configured and working. No error, no warning,
+nothing to suggest the answer was filtered. It is indistinguishable from a realm
+where nothing has ever been set up.
+
+This has bitten in practice, on this codebase, and it cost real time: an audit run
+as an ordinary user concluded the KDC-side allowlist did not exist, and only a
+direct LDAP query as directory manager showed two rules quietly doing their job.
+It applies to a host principal too, so checking from the MCP host is equally
+useless.
+
+Two things follow. **Audit delegation as `admin` or over LDAP, never as
+yourself.** And if you are the person who will later have to verify this, grant
+your own account the Service Administrators privilege now, while you still
+remember these objects exist. They are invisible in the web UI, so there is
+nothing to stumble across that would remind you.
+
+To see them regardless of IPA permissions, from the IPA server itself:
+
+```sh
+ldapsearch -LLL -Y EXTERNAL -H ldapi://%2frun%2fslapd-EXAMPLE-INTERNAL.socket \
+    -b cn=s4u2proxy,cn=etc,dc=example,dc=internal \
+    "(objectClass=*)" cn memberPrincipal ipaAllowedTarget
+```
 
 Second, callers need forwardable tickets. Without protocol transition the KDC
 hard-requires it. On Windows that is `setup.ps1 -Forwardable`; elsewhere it is
