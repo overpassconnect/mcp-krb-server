@@ -395,5 +395,67 @@ class NarrowEvidenceCheck(Base):
             fake_gssapi.raw = saved
 
 
+class SpnegoFraming(unittest.TestCase):
+    """The header must carry a SPNEGO token, not a bare krb5 AP-REQ.
+
+    This is asserted directly because the difference is invisible from a working
+    deployment: Go's gokrb5 accepts a bare AP-REQ, so a site whose only
+    downstream is Gitea cannot tell. A Java acceptor holding a SPNEGO-only
+    acceptor credential refuses it with
+
+        GSSException: No credential found for: 1.2.840.113554.1.2.2 usage: Accept
+
+    which surfaces as an HTTP 500 and reads like a fault in the far end rather
+    than a mech mismatch here.
+    """
+
+    KRB5 = '1.2.840.113554.1.2.2'
+    SPNEGO = '1.3.6.1.5.5.2'
+
+    def test_der_oid_matches_the_known_encodings(self):
+        # Derived rather than hardcoded in the source, so pin the two answers.
+        self.assertEqual(delegation._der_oid(self.SPNEGO),
+                         bytes.fromhex('06062b0601050502'))
+        self.assertEqual(delegation._der_oid(self.KRB5),
+                         bytes.fromhex('06092a864886f712010202'))
+
+    def test_wrap_is_an_application_0_spnego_token_carrying_the_ap_req(self):
+        w = delegation._spnego_wrap(b'\xaa\xbb\xcc', self.KRB5, self.SPNEGO)
+        # 60 22            [APPLICATION 0], 34 bytes
+        #   06 06 2b...02    SPNEGO
+        #   a0 18            [0] NegotiationToken
+        #     30 16          NegTokenInit
+        #       a0 0d 30 0b 06 09 2a...02   mechTypes: krb5 alone
+        #       a2 05 04 03 aabbcc          mechToken: the AP-REQ
+        self.assertEqual(
+            w.hex(),
+            '602206062b0601050502a0183016a00d300b06092a864886f712010202a2050403aabbcc')
+
+    def test_long_form_length_for_a_realistic_token(self):
+        # A real AP-REQ is well over 127 bytes, so the short-form length encoding
+        # is never exercised in production and must not be the only one tested.
+        w = delegation._spnego_wrap(b'A' * 300, self.KRB5, self.SPNEGO)
+        self.assertEqual(w[0], 0x60)
+        self.assertEqual(w[1], 0x82)                    # long form, 2 length bytes
+        self.assertIn(bytes.fromhex('0482012c'), w)     # OCTET STRING, 300 bytes
+
+    def test_header_produced_by_negotiate_header_is_framed(self):
+        d = Base('run')
+        d.setUp()
+        try:
+            d.enable()
+            delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+            fake_gssapi.allow_target(TARGET)
+            h = delegation.negotiate_header(d.evidence_for(), 't', d.IMPERSONATOR)
+            tok = base64.b64decode(h.split(' ', 1)[1], validate=True)
+            self.assertEqual(tok[0], 0x60, 'not an [APPLICATION 0] GSS token')
+            self.assertIn(bytes.fromhex('06062b0601050502'), tok[:16],
+                          'SPNEGO mech OID missing: this is a bare AP-REQ')
+            self.assertIn(bytes.fromhex('06092a864886f712010202'), tok,
+                          'krb5 not offered in mechTypes')
+        finally:
+            d.tearDown()
+
+
 if __name__ == '__main__':
     unittest.main()

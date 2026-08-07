@@ -30,6 +30,13 @@ class OID:
     def from_int_seq(seq):
         return OID(seq)
 
+    @property
+    def dotted_form(self):
+        # Real python-gssapi exposes this, and delegation.py derives the DER
+        # encoding of a mech OID from it rather than hardcoding byte strings.
+        # The fake is only useful while it matches the API it stands in for.
+        return self.seq
+
     def __eq__(self, o):
         return isinstance(o, OID) and o.seq == self.seq
 

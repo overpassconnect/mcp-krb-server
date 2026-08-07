@@ -210,6 +210,70 @@ def target_for(tool):
     return spn
 
 
+# --- SPNEGO framing ---------------------------------------------------------
+#
+# gss_init_sec_context with the krb5 mech returns a BARE AP-REQ. RFC 4559 says an
+# HTTP Negotiate header carries a SPNEGO token, and acceptors disagree on how
+# strictly to read that. Go's gokrb5 accepts a bare AP-REQ, which is why Gitea
+# worked from day one and hid this for months. A Java acceptor holding a
+# SPNEGO-only acceptor credential does not, and answers
+#     GSSException: No credential found for: 1.2.840.113554.1.2.2 usage: Accept
+# so the caller sees an HTTP 500 that reads like a fault in the far end.
+#
+# The obvious fix, initiating with mech=SPNEGO, is WRONG here and was tried: it
+# changes the request the KDC sees and the S4U2Proxy is refused outright
+# (kdc-refused), which takes every downstream with it, Gitea included. So the
+# Kerberos step is left untouched and only its result is re-framed, which is
+# exactly what SPNEGO itself emits once it has settled on krb5:
+#
+#   InitialContextToken ::= [APPLICATION 0] IMPLICIT SEQUENCE {
+#       thisMech          OBJECT IDENTIFIER,      -- SPNEGO
+#       innerContextToken NegotiationToken }
+#   NegotiationToken ::= CHOICE { negTokenInit [0] NegTokenInit, ... }
+#   NegTokenInit ::= SEQUENCE {
+#       mechTypes [0] MechTypeList,               -- krb5 alone: nothing to negotiate
+#       mechToken [2] OCTET STRING }              -- the AP-REQ produced above
+#
+# Only the two fields an acceptor needs are emitted. reqFlags and mechListMIC are
+# optional and omitted, so there is no MIC to compute over a single-mech list.
+
+
+def _der_len(n):
+    if n < 0x80:
+        return bytes((n,))
+    b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    return bytes((0x80 | len(b),)) + b
+
+
+def _der(tag, payload):
+    return bytes((tag,)) + _der_len(len(payload)) + payload
+
+
+def _der_oid(dotted):
+    """A dotted OID as a DER OBJECT IDENTIFIER, tag and length included.
+
+    Derived from the OID constants rather than hardcoded byte strings, so the
+    encoding cannot drift away from the mechs the acceptor half pins."""
+    parts = [int(p) for p in dotted.split('.')]
+    body = bytes((40 * parts[0] + parts[1],))
+    for p in parts[2:]:
+        chunk = bytes((p & 0x7F,))
+        p >>= 7
+        while p:
+            chunk = bytes((0x80 | (p & 0x7F),)) + chunk
+            p >>= 7
+        body += chunk
+    return _der(0x06, body)
+
+
+def _spnego_wrap(krb5_token, krb5_oid, spnego_oid):
+    """Wrap a bare krb5 AP-REQ as a SPNEGO NegTokenInit."""
+    mech_types = _der(0xA0, _der(0x30, _der_oid(krb5_oid)))
+    mech_token = _der(0xA2, _der(0x04, krb5_token))
+    return _der(0x60, _der_oid(spnego_oid)
+                + _der(0xA0, _der(0x30, mech_types + mech_token)))
+
+
 def negotiate_header(evidence_cred, tool, impersonator, audit=None):
     """Return an 'Authorization: Negotiate <b64>' value that authenticates to the
     tool's allowlisted downstream service as the caller.
@@ -225,6 +289,10 @@ def negotiate_header(evidence_cred, tool, impersonator, audit=None):
     import gssapi
     from gssapi.exceptions import GSSError
 
+    # The same two OIDs the acceptor half pins, imported rather than restated so
+    # the halves cannot drift into disagreeing about which mechs this server speaks.
+    from spnego_auth import KRB5_MECH, SPNEGO_MECH
+
     spn = target_for(tool)                       # raises unless explicitly allowed
     if evidence_cred is None:
         # Either delegation is off in the acceptor, or the caller's ticket could
@@ -239,6 +307,10 @@ def negotiate_header(evidence_cred, tool, impersonator, audit=None):
 
     try:
         name = gssapi.Name(spn, gssapi.NameType.hostbased_service)
+        # Deliberately NOT mech=SPNEGO here. Passing the SPNEGO mech changes the
+        # request the KDC sees and it refuses the S4U2Proxy outright (kdc-refused),
+        # taking every downstream with it. The Kerberos step stays exactly as it
+        # was; only the framing of its result changes, below.
         ctx = gssapi.SecurityContext(name=name, creds=evidence_cred, usage='initiate')
         token = ctx.step()
     except GSSError as e:
@@ -246,6 +318,7 @@ def negotiate_header(evidence_cred, tool, impersonator, audit=None):
 
     if not token:
         raise DelegationError('empty-token')
+    token = _spnego_wrap(token, KRB5_MECH.dotted_form, SPNEGO_MECH.dotted_form)
     if audit:
         # actor / subject / target, the three names an incident responder needs to
         # reconstruct who did what through whom.
