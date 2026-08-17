@@ -51,8 +51,20 @@ class SpnegoAuthMiddleware:
         # compose an evidence credential naming the caller. See spnego_auth and
         # delegation.py; enabling it is a deployment decision, not a code default.
         self.delegation = bool(delegation)
-        self.creds = spnego_auth.make_acceptor_creds(     # explicit SPN [C2]; fails fast
+        # Not make_acceptor_creds directly: with delegation on, the credential
+        # carries a TGT that dies after a day, and holding one object for the
+        # life of the process is how a healthy-looking server silently stops
+        # being able to delegate. See RenewingAcceptorCredentials. It acquires
+        # once here, so an unusable SPN or keytab still fails fast at startup.
+        self._creds = spnego_auth.RenewingAcceptorCredentials(   # explicit SPN [C2]
             spn, keytab=keytab, delegation=self.delegation)
+
+    @property
+    def creds(self):
+        """The acceptor credential, re-acquired if it is spent. A property, so
+        every read goes through the freshness check rather than only the reads
+        that remembered to."""
+        return self._creds.get()
 
     async def __call__(self, scope, receive, send):
         if scope.get('type') != 'http':

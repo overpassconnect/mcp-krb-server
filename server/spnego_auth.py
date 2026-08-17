@@ -97,6 +97,77 @@ def make_acceptor_creds(spn, keytab=None, delegation=False, ccache=None):
     return gssapi.Credentials(name=name, usage='both', store=store)
 
 
+# How much initiator lifetime must remain for the credential to be reused. Ten
+# minutes: long enough that a request beginning now cannot have its credential
+# expire mid-S4U2Proxy, short enough that re-acquisition is rare.
+CREDENTIAL_REFRESH_MARGIN = 600
+
+
+def credential_expiring(creds, margin=CREDENTIAL_REFRESH_MARGIN):
+    """True when `creds` cannot be relied on for another `margin` seconds.
+
+    An expired credential does not report a lifetime of zero: MIT raises when
+    you inquire one, so this treats a raised GSSError as "expired" rather than
+    letting it escape. An acceptor credential taken from a keytab has no expiry
+    and reports an indefinite lifetime, which is not a reason to re-acquire."""
+    if creds is None:
+        return True
+    try:
+        remaining = creds.lifetime
+    except GSSError:
+        return True
+    if remaining is None:            # indefinite, i.e. keytab-derived
+        return False
+    return remaining < margin
+
+
+class RenewingAcceptorCredentials:
+    """Acceptor credentials that re-acquire themselves before they expire.
+
+    make_acceptor_creds says "call once at startup". For a receive-only
+    credential that is correct: it comes from a keytab and never expires. With
+    delegation=True it is wrong, and the difference caused a silent multi-day
+    outage on a live deployment.
+
+    usage='both' acquires initiator material too, and that half is an ordinary
+    TGT with an ordinary 24 hour life. MIT does re-acquire it from the client
+    keytab, but only when credentials are ACQUIRED. A process that acquires once
+    and holds the object for weeks never gives it that chance, so the TGT simply
+    expires in place.
+
+    What makes it silent is the asymmetry: accepting an incoming ticket reads
+    the keytab directly and keeps working forever, so the server authenticates
+    callers, authorizes them, and reports itself healthy, while every delegated
+    call is refused by the KDC. Nothing in between says so.
+
+    Measured, not theorised: acquired 08-08 13:45, expired 08-09 13:34, and
+    every S4U2Proxy from then until 08-17 was refused with KDC_ERR_BADOPTION,
+    which reads like a delegation policy fault and sends you to inspect FreeIPA.
+
+    Re-acquisition is cheap when the cache is still valid, because that is the
+    path on which MIT reuses it."""
+
+    def __init__(self, spn, keytab=None, delegation=False, ccache=None,
+                 margin=CREDENTIAL_REFRESH_MARGIN):
+        self._args = (spn, keytab, bool(delegation), ccache)
+        self._margin = margin
+        self._creds = None
+        self.get()          # fail fast at startup, as the direct call did
+
+    def get(self):
+        """The credential to use for this request, re-acquiring if it is spent."""
+        if not credential_expiring(self._creds, self._margin):
+            return self._creds
+        spn, keytab, delegation, ccache = self._args
+        # Rebind only after a successful acquisition. If the KDC or the keytab
+        # is briefly unavailable, holding the old credential lets requests that
+        # can still succeed carry on, rather than turning a transient outage
+        # into a hard failure.
+        self._creds = make_acceptor_creds(
+            spn, keytab=keytab, delegation=delegation, ccache=ccache)
+        return self._creds
+
+
 def authenticate(acceptor_creds, authorization_header, want_evidence=False):
     """Validate one 'Authorization: Negotiate <b64>' header.
 

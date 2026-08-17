@@ -73,11 +73,39 @@ class Name:
         return self.base
 
 
+acquisitions = []   # every Credentials ever acquired, so tests can count them
+
+
 class Credentials:
+    # What a freshly acquired credential starts with. Acceptor credentials come
+    # from a keytab and never expire, which MIT reports as an indefinite
+    # lifetime; anything that can initiate holds an ordinary TGT with an
+    # ordinary life. Modelled rather than stubbed, because the difference
+    # between those two is the entire bug this models.
+    INITIATE_LIFETIME = 86400
+
     def __init__(self, name=None, usage=None, store=None):
         self.name = name
         self.usage = usage
         self.store = store
+        self._lifetime = None if usage == 'accept' else Credentials.INITIATE_LIFETIME
+        acquisitions.append(self)
+
+    @property
+    def lifetime(self):
+        """Seconds remaining, None when indefinite.
+
+        An expired credential does NOT report zero: MIT raises when you inquire
+        one. Code that only compares numbers would sail past an expired
+        credential, so the fake raises here for the same reason the real thing
+        does."""
+        if self._lifetime is not None and self._lifetime <= 0:
+            raise GSSError('Major (851968): The referenced credential has expired')
+        return self._lifetime
+
+    def expire(self):
+        """Test hook: age this credential out, as nine days of uptime would."""
+        self._lifetime = 0
 
     def impersonate(self, name, usage='initiate'):     # S4U2Self (not exercised)
         return Credentials(name=name, usage=usage)
@@ -229,5 +257,7 @@ raw = _Raw()
 
 def reset():
     contexts.clear()
+    acquisitions.clear()
     SecurityContext._counter = 0
     ALLOWED_TARGETS.clear()
+    Credentials.INITIATE_LIFETIME = 86400
