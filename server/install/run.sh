@@ -1973,7 +1973,12 @@ PY
             printf "  downloadBase: '%s',\n" "$(js_str "$CLIENT_DOWNLOAD_BASE")"
             # Drives whether the page shows the CA step at all, and which
             # argument the macOS command carries.
-            printf "  caInstall: %s\n" "$([ "$CLIENT_CA_INSTALL" = yes ] && echo true || echo false)"
+            # Trailing comma, because this is no longer the last key. Leaving it
+            # off is how config.example.js shipped as invalid JavaScript for
+            # months: a key appended after the final one turns the whole object
+            # literal into a SyntaxError, window.SITE never gets defined, and the
+            # page renders with every token unresolved.
+            printf "  caInstall: %s,\n" "$([ "$CLIENT_CA_INSTALL" = yes ] && echo true || echo false)"
             # Whether this deployment forwards on behalf of callers, taken from
             # the server's own MCP_DELEGATION rather than configured twice. When
             # it is on, the page's install commands carry -Forwardable and
