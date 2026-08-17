@@ -7,8 +7,12 @@ falls back to a placeholder and the deployment looks fine until someone reads th
 rendered command and finds <set domain in config.js> in it.
 """
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
+
+NODE = shutil.which("node")
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_JS = ROOT / "client" / "web" / "app.js"
@@ -33,6 +37,41 @@ def keys_config_example_documents():
     text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
     body = text[text.index("window.SITE"):]
     return set(re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", body, re.M))
+
+
+class TestExampleConfigIsUsable(unittest.TestCase):
+    """The key checks below read this file with a regex, which is blind to
+    whether it is valid JavaScript. It was not: a missing comma after
+    supportEmail made the whole object literal a SyntaxError, so window.SITE
+    never got defined and every token on the page stayed unresolved. The key
+    extraction found all the keys regardless and reported the file healthy.
+
+    It shipped that way because nothing loads it: run.sh generates config.js
+    itself, so only the documented copy-to-config.js path was broken, and that
+    path has no user until someone hand-writes a deployment."""
+
+    @unittest.skipUnless(NODE, "node not available")
+    def test_the_example_config_parses_as_javascript(self):
+        r = subprocess.run([NODE, "--check", str(CONFIG_EXAMPLE)],
+                           capture_output=True, text=True)
+        self.assertEqual(0, r.returncode,
+                         "config.example.js is not valid JavaScript, so copying it "
+                         "to config.js yields a page with no config at all:\n%s"
+                         % (r.stderr or r.stdout))
+
+    @unittest.skipUnless(NODE, "node not available")
+    def test_it_actually_defines_the_keys_once_evaluated(self):
+        # Parsing is not enough: the file has to leave window.SITE populated.
+        # Evaluated in a bare context, so a stray reference to a browser global
+        # would fail here rather than on a workstation.
+        script = ("var window = {};"
+                  + CONFIG_EXAMPLE.read_text(encoding="utf-8")
+                  + ";if (typeof window.SITE !== 'object') { process.exit(1); }"
+                  + "if (!window.SITE.realm || !window.SITE.domain) { process.exit(2); }")
+        r = subprocess.run([NODE, "-e", script], capture_output=True, text=True)
+        self.assertEqual(0, r.returncode,
+                         "config.example.js parses but does not leave a populated "
+                         "window.SITE:\n%s" % (r.stderr or r.stdout))
 
 
 class TestClientConfigKeys(unittest.TestCase):

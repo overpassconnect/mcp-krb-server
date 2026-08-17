@@ -18,7 +18,7 @@ window.SITE = {
   mcpUrl: 'https://mcp.example.internal/', // the Kerberized MCP API the bridge talks to
   caSha256: '',                           // sha256sum of /etc/ipa/ca.crt, optional (Windows/macOS CA pin)
   dnsIp: '',                              // resolver that answers for `domain`, optional (macOS split DNS)
-  supportEmail: ''                        // optional; blank leaves a generic "contact your IT team",
+  supportEmail: '',                       // optional; blank leaves a generic "contact your IT team"
   caInstall: true,                        // false where the CA arrives by MDM or a golden image:
                                           // the page then drops the trust step and passes --skip-ca
   downloadBase: ''                        // optional; only when the files are NOT beside the page.
