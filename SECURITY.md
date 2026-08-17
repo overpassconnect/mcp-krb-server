@@ -474,9 +474,22 @@ enforces the same posture two ways: `GSSAPIDelegateCredentials no` in the manage
 second is strictly stronger, not a duplicate - a non-forwardable TGT cannot be
 delegated even by a misconfigured client. Note the consequence: it also forecloses
 the *evidence-based S4U2Proxy* path (calling another service as the caller).
-[D1] now ships this (off by default), so this is no longer hypothetical: those
-Windows workstations cannot use it until `forwardable` changes, because
-`forwardable` must be revisited for Windows workstations.
+[D1] now ships this (off by default), so this is no longer hypothetical: a
+workstation provisioned with the default cannot use it until `forwardable`
+changes.
+
+Both kits that write `krb5.conf` now expose that as a switch, off by default:
+`setup.ps1 -Forwardable` and `setup-macos.sh --forwardable`. macOS previously
+hardcoded `false` with no way to opt in, so a Mac could not use [D1] at all.
+
+Linux does not go through either: `ipa-client-install` writes `krb5.conf` and
+FreeIPA's default is `forwardable = true` (verified on three enrolled hosts), so
+an enrolled Linux workstation can already forward. The asymmetry is worth stating
+because it produces a confusing failure: in one fleet, provisioned one way, the
+Linux users' on-behalf-of tools work and the Windows and macOS users' do not.
+The refusal is a KDC `KDC_ERR_BADOPTION`, reported by the server as
+`kdc-badoption:check-rule-target-and-caller-forwardable`, which names both
+suspects because it cannot tell them apart.
 
 ---
 

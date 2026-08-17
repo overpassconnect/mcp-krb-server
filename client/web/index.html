@@ -268,11 +268,27 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     through WSL while every other host keeps using the native Windows <code>ssh</code>, and the
     MCP bridge. One profile, both worlds, nothing to run afterwards.</p>
 
+    <p class="note"><strong>Add <code>-Forwardable</code> if the MCP tools here act on your
+    behalf.</strong> Some tools reach another service <em>as you</em>, so that the far end logs
+    the real person instead of a shared service account. The Kerberos mechanism behind that
+    refuses to work unless your own ticket is forwardable, and the switch is off by default
+    because a fleet that does not need it is safer without it: a non-forwardable ticket cannot
+    be handed on even by a client that tries to.</p>
+
+    <p class="note">Get this wrong and nothing fails now. It fails much later, on the first
+    such tool, with <code>cannot act on your behalf</code>, which does not point here. Ask
+    whoever runs the MCP host whether this deployment uses on-behalf-of forwarding; if it does,
+    append <code>-Forwardable</code> to the command above. Changing it afterwards means re-running
+    with the switch, then <code>wsl kdestroy</code> and a fresh <code>kinit</code>, because the
+    flag is fixed into the ticket when it is issued.</p>
+
     <p class="note">Afterwards, in a <em>new</em> terminal:
     <code>wsl kinit &lt;your-ipa-username&gt;@__REALM__</code>, then
     <code>wslssh host.__DOMAIN__</code>. Your existing <code>ssh</code>, keys, host aliases and
     <code>known_hosts</code> are left untouched: the script adds <code>wslssh</code> rather than
-    hijacking <code>ssh</code>. Tickets last 24 hours and renew with <code>wsl kinit -R</code>.</p>
+    hijacking <code>ssh</code>. Tickets last 24 hours and renew with <code>wsl kinit -R</code>.
+    Check what you got with <code>wsl klist -f</code>: the flags show <code>F</code> when the
+    ticket is forwardable.</p>
 
     <p class="note">Take <code>-CaSha256</code> from <code>sha256sum /etc/ipa/ca.crt</code> on an
     enrolled host, or from IT, rather than the copy printed on this page. It is what makes the
@@ -415,6 +431,20 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
     this Kerberos understands. VS Code needs no configuration here, because the
     <code>remote.SSH.*</code> settings on the Windows tab exist only to push <code>ssh</code>
     across the WSL boundary, and a Mac's own <code>ssh</code> already speaks GSSAPI.</p>
+
+    <p class="note"><strong>Add <code>--forwardable</code> if the MCP tools here act on your
+    behalf.</strong> Same rule as the Windows tab, same reason: a tool that reaches another
+    service <em>as you</em> needs your own ticket to be forwardable, and it is off by default
+    because a fleet that does not need it is safer without it. Without the switch nothing fails
+    at install time; the first such tool later reports <code>cannot act on your behalf</code>,
+    which does not point back here. Ask whoever runs the MCP host whether this deployment
+    forwards.</p>
+
+    <p class="note">Check what you got with <code>klist -v</code> and look for the forwardable
+    flag. Note the spelling: this is Heimdal, so <code>klist -f</code> is the MIT form and not
+    what it understands. Changing the setting later means re-running with
+    <code>--forwardable</code>, then <code>kdestroy</code> and a fresh <code>kinit</code>, since
+    the flag is fixed into the ticket when it is issued.</p>
 
     <p class="note">Registration goes into <code>~/.claude.json</code>, which the script writes
     itself, so no <code>claude</code> CLI is needed. The Claude <em>Desktop</em> chat app is a

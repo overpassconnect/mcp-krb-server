@@ -276,13 +276,24 @@ with itself.
 
 ### Ticket forwardability and `-Forwardable`
 
-`setup.ps1 -Forwardable` controls one line of WSL's `/etc/krb5.conf`. It is
-off by default, and off is the safer state:
+One line of `krb5.conf`, on every platform, off by default, and off is the safer
+state:
 
 ```powershell
 .\setup.ps1 -IpaUser jdoe                 # forwardable = false  (default)
 .\setup.ps1 -IpaUser jdoe -Forwardable    # forwardable = true
 ```
+
+```sh
+sh setup-macos.sh ... --forwardable       # the same switch on macOS
+```
+
+On Linux the value comes from the realm: `ipa-client-install` writes
+`krb5.conf`, and FreeIPA's default is `forwardable = true`, so an enrolled Linux
+workstation can already forward and needs no flag. That asymmetry is worth
+knowing before debugging: the same fleet can have Linux users for whom
+on-behalf-of tools work and Windows or macOS users for whom they do not, with no
+difference in how any of them were provisioned by this kit.
 
 Off writes `forwardable = false`, paired with `GSSAPIDelegateCredentials no` for
 SSH. A non-forwardable ticket cannot be delegated even by a client that asks to,

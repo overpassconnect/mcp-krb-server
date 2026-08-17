@@ -40,12 +40,25 @@
 #              managed-mcp.json instead of the user's ~/.claude.json. Mirrors
 #              install-bridge.sh --managed on Linux. Takes EXCLUSIVE control:
 #              users can then add no MCP servers of their own.
+#
+#   --forwardable
+#              write forwardable = true in krb5.conf. REQUIRED if this fleet uses
+#              on-behalf-of forwarding (SECURITY.md [D1]): evidence-based
+#              S4U2Proxy hard-requires a forwardable caller ticket, and without
+#              it every forwarding tool fails with an opaque "cannot act on your
+#              behalf" long after this script has finished. Mirrors
+#              setup.ps1 -Forwardable.
+#
+#              Off by default, and that is the stronger posture: a
+#              non-forwardable ticket cannot be delegated even by a client that
+#              asks to, so a fleet that does not forward is structurally unable
+#              to hand its users' credentials to anything.
 
 set -eu
 
 DOMAIN=''; REALM=''; KDC=''; DNS_IP=''; IPA_USER=''
 MCP_URL=''; BASE_URL=''; CA_SHA=''
-SKIP_CA=0; SKIP_MCP=0; DRY_RUN=0; MANAGED=0
+SKIP_CA=0; SKIP_MCP=0; DRY_RUN=0; MANAGED=0; FORWARDABLE=0
 CERT_SHA1=''
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -69,6 +82,7 @@ while [ $# -gt 0 ]; do
         --skip-mcp)   SKIP_MCP=1; shift ;;
         --skip-ca)    SKIP_CA=1; shift ;;
         --managed)    MANAGED=1; shift ;;
+        --forwardable) FORWARDABLE=1; shift ;;
         --dry-run)    DRY_RUN=1; shift ;;
         -h|--help)    usage ;;
         *)            die "unknown argument: $1" ;;
@@ -148,7 +162,10 @@ fi
 # break GUI launches and the failure would look unrelated.
 echo "==> 2. Kerberos client"
 if [ "$DRY_RUN" = 1 ]; then
-    say "would back up any existing /etc/krb5.conf, then write kdc = tcp/$KDC"
+    if [ "$FORWARDABLE" = 1 ]; then _f=true; else _f=false; fi
+    # Named in the dry run because it is the one value here that decides whether
+    # on-behalf-of tools work, and it fails far from this script if it is wrong.
+    say "would back up any existing /etc/krb5.conf, then write kdc = tcp/$KDC, forwardable = $_f"
 else
     mkdir -p "$APPDIR"
     # Back up the original exactly once. A second run must not overwrite the
@@ -162,6 +179,12 @@ else
             say "original already backed up, not overwriting it"
         fi
     fi
+    # Pre-computed, never an expression inside the heredoc below. setup.ps1
+    # got that wrong twice: an inline subexpression testing a variable that
+    # was not a parameter evaluated empty on every run and emitted 'false'
+    # unconditionally, a security-relevant value that looked configurable
+    # and was not.
+    if [ "$FORWARDABLE" = 1 ]; then FWD=true; else FWD=false; fi
     $SUDO tee /etc/krb5.conf >/dev/null <<CONF
 [libdefaults]
     default_realm = $REALM
@@ -170,7 +193,7 @@ else
     rdns = false
     ticket_lifetime = 24h
     renew_lifetime = 7d
-    forwardable = false
+    forwardable = $FWD
 
 [realms]
     $REALM = {
@@ -183,7 +206,7 @@ else
     .$DOMAIN = $REALM
     $DOMAIN = $REALM
 CONF
-    say "wrote /etc/krb5.conf (kdc = tcp/$KDC, forwardable = false)"
+    say "wrote /etc/krb5.conf (kdc = tcp/$KDC, forwardable = $FWD)"
 fi
 
 # ------------------------------------------------------- 3. SSH
