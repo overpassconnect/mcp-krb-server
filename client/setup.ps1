@@ -869,7 +869,7 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|wslgit)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
 # Same reasoning as wslssh, one addition: git is directory-sensitive where ssh is
 # not, so this carries --cd. $PWD is the Windows working directory and wsl.exe
@@ -893,8 +893,26 @@ $kept += "function wslgit { wsl.exe --cd `"`$PWD`" -e git @args }   # Kerberos g
 # One line, because the profile is kept idempotent by matching whole `function`
 # lines and a multi-line definition would leave orphans behind on re-run.
 $kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e mcp-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
+# The three ticket verbs. Everything above is a consumer of a ticket; these are
+# how you get one, look at it and drop it, so they are the commands actually
+# typed daily and the ones worth not typing in full.
+#
+# wslkinit defaults to this workstation's principal because that is the part
+# people get wrong: `kinit stergios` (no realm) succeeds against the local
+# default realm and yields a ticket for the wrong principal, which then fails
+# much later at the service with an error that names neither. Baking in the
+# realm removes the chance. Arguments still pass through, so `wslkinit -R`
+# renews and `wslkinit someone-else@REALM` works.
+#
+# There is no Windows equivalent to fall back on: this estate holds no tickets
+# outside WSL, so unlike ssh and git there is no native `kinit` these could
+# shadow. Naming them wsl* anyway keeps one rule for the whole set rather than
+# an exception to remember.
+$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm } }   # Kerberos kinit via WSL (setup.ps1)"
+$kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
+$kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh, wslgit and mcp-fetch functions added (your `ssh` and `git` are left untouched)'
+Say 'PowerShell: wslssh, wslgit, mcp-fetch, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
 
 # Windows git defaults to core.autocrlf=true and WSL git to false. With the
 # checkout on the Windows filesystem BOTH act on one worktree, so each sees files

@@ -109,9 +109,16 @@ foreach ($f in $created) {
 # keeps it: only the lines setup.ps1 stamped with its markers are the kit's.
 # One marker per function it writes; a function added to setup.ps1 without its
 # marker added here survives uninstall forever.
+# That is not hypothetical: the git marker was missing here from the day wslgit
+# was added, so every uninstall left it behind. test_profile_marker_parity.py
+# now fails if setup.ps1 stamps a marker this list does not carry.
 $markers = @(
     '# Kerberos ssh via WSL (setup.ps1)',
-    '# Kerberos fetch via WSL (setup.ps1)'
+    '# Kerberos fetch via WSL (setup.ps1)',
+    '# Kerberos git via WSL (setup.ps1)',
+    '# Kerberos kinit via WSL (setup.ps1)',
+    '# Kerberos klist via WSL (setup.ps1)',
+    '# Kerberos kdestroy via WSL (setup.ps1)'
 )
 if (Test-Path $ProfilePath) {
     $lines = @(Get-Content -Path $ProfilePath)
