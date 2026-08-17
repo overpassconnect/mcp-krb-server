@@ -1144,8 +1144,23 @@ recorded in the manifest, never the default distro:
 .\uninstall.ps1 -Yes            # apply it
 ```
 
-macOS has no uninstall script, matching its install. The steps, in reverse order
-of the manual procedure:
+macOS uses the same `uninstall.sh`, which reads `uname` and takes the macOS
+paths: the kit's tree under `~/Library/Application Support/mcp-krb`, the
+`/etc/resolver` file, the realm CA in the System keychain (matched on SHA-1,
+because `security delete-certificate` matches nothing when given the SHA-256 the
+download was verified with), and the original `krb5.conf` the installer kept
+beside the manifest.
+
+```sh
+sh uninstall.sh                 # print the plan
+sh uninstall.sh --yes           # apply it
+```
+
+Run it as yourself, without `sudo`. The manifest lives under `$HOME`, so `sudo`
+sends the script looking in root's home, where it finds none and refuses; it
+elevates internally for the steps that need it, exactly as the install does.
+
+The equivalent by hand, in reverse order of the manual procedure:
 
 ```sh
 # 1. the bridge and its registration

@@ -159,7 +159,7 @@
     enrolled: skip the enrolment entirely and use the second block, which installs the bridge
     only.</p>
 
-    <h3>Case 1: the machine is not enrolled yet</h3>
+    <h3>Install, case 1: the machine is not enrolled yet</h3>
     <div class="fill" data-fill="linux-cmd">
       <label>Hostname IT gave you
         <input type="text" autocomplete="off" spellcheck="false"
@@ -185,7 +185,7 @@ sudo sh setup.sh \
     --password='&lt;OTP&gt;' \
     --unattended</code></pre>
 
-    <h3>Case 2: the machine is already enrolled</h3>
+    <h3>Install, case 2: the machine is already enrolled</h3>
 <pre><code id="linux-cmd-enrolled">cd "$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsS __BASE__/install-bridge.sh -o install-bridge.sh
 
@@ -212,6 +212,29 @@ sudo sh install-bridge.sh \
     registering it machine-wide; the script then prints the <code>claude mcp add</code> line to
     run as yourself. Drop <code>--unattended</code> from the first block if you would rather
     confirm the enrolment interactively.</p>
+
+    <h3>Uninstall</h3>
+<pre><code id="linux-uninstall">cd "$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsS __BASE__/uninstall.sh -o uninstall.sh
+
+sudo sh uninstall.sh            # print the plan, change nothing
+sudo sh uninstall.sh --yes      # apply it</code></pre>
+
+    <p class="note">A dry run by default: it prints the plan and changes nothing until you add
+    <code>--yes</code>. Every removal is justified by an entry in the install manifest saying an
+    installer created that file, and every replaced file goes back to its recorded prior state
+    rather than being deleted, so anything the machine already had it keeps. With no manifest the
+    script refuses to guess and exits non-zero, because an uninstaller that improvises either
+    leaves things behind or deletes what it never installed.</p>
+
+    <p class="note"><code>--keep-packages</code> leaves apt/dnf packages alone even where this kit
+    installed them; <code>--managed</code> also removes the machine-wide
+    <code>/etc/claude-code</code> registration, which serves every user on the machine and is
+    opt-in for that reason.</p>
+
+    <p class="note">It does not un-enrol the machine from FreeIPA. That is a realm-side change,
+    irreversible from here and with its own command, so the script prints it at the end rather
+    than running it.</p>
   </section>
 
   <div class="sep">other platforms</div>
@@ -223,6 +246,7 @@ sudo sh install-bridge.sh \
     WSL distro needs it. If a distro already exists that step is skipped, but start elevated
     anyway so the run does not stop halfway.</p>
 
+    <h3>Install</h3>
     <p class="note">One command, one file to download. The realm values below are already filled
     in for you, so the only thing to edit is your username.</p>
     <div class="fill" data-fill="win-cmd">
@@ -284,6 +308,29 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     <p class="note">No WSL2 at all and the install stalls? Once, elevated:
     <code>wsl --install -d Ubuntu-24.04</code>, launch it once to create your Linux user, reboot
     if asked, then re-run. The script is idempotent, so a second run is safe.</p>
+
+    <h3>Uninstall</h3>
+<pre><code id="win-uninstall">$base = "__BASE__"
+iwr -useb "$base/uninstall.ps1" -OutFile uninstall.ps1
+
+.\uninstall.ps1                 # print the plan, change nothing
+.\uninstall.ps1 -Yes            # apply it</code></pre>
+
+    <p class="note">A dry run by default, driven by the same install manifest as the other
+    platforms, and it cleans the WSL side too. It reverses that side through the distro the
+    installer recorded, never the current default: on a machine that later gained Docker Desktop
+    the default is frequently not the distro that was provisioned.</p>
+
+    <p class="note">The VS Code keys are the reason this script exists rather than a list of
+    steps. <code>remote.SSH.path</code> goes back to its recorded prior value instead of being
+    deleted, because the older hand-written rollback removed the dispatcher and said nothing
+    about the setting, which left Remote-SSH pointed at a file that no longer existed for every
+    host, including ones that worked before this kit arrived.</p>
+
+    <p class="note">It never runs <code>wsl --unregister</code>. Deleting an entire Linux
+    filesystem is not an uninstall step for an SSH shim, so the command is printed for whoever
+    genuinely wants it; a test asserts no code path here runs it. <code>.bak</code> files are
+    reported by path and left alone, since they may predate this kit.</p>
   </section>
 
   <section id="macos">
@@ -324,6 +371,7 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     block gives you <code>command not found: #</code>. The commentary lives out here instead,
     so everything in a box can be pasted as-is.</p>
 
+    <h3>Install</h3>
     <div class="fill" data-fill="mac-script">
       <label>Your IPA username
         <input type="text" autocomplete="off" spellcheck="false"
@@ -368,82 +416,29 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
     <code>remote.SSH.*</code> settings on the Windows tab exist only to push <code>ssh</code>
     across the WSL boundary, and a Mac's own <code>ssh</code> already speaks GSSAPI.</p>
 
-    <h3>By hand</h3>
-    <p class="note">The same thing without running a downloaded script, in six stanzas:
-    <strong>1</strong> the realm CA, first for the reason above, <strong>2</strong> split DNS to
-    the realm resolver, <strong>3</strong> the Kerberos client, <strong>4</strong> SSH over
-    GSSAPI with delegation off (SECURITY.md&nbsp;[CL1]), <strong>5</strong> the bridge as a
-    per-user venv needing no sudo, and <strong>6</strong> registering it, then a ticket.
-    <code>default_ccache_name</code> is deliberately unset: macOS keeps the ticket in a
-    session-wide cache, which is what lets an app launched from the Dock find it.</p>
+    <p class="note">Registration goes into <code>~/.claude.json</code>, which the script writes
+    itself, so no <code>claude</code> CLI is needed. The Claude <em>Desktop</em> chat app is a
+    different program reading a different file and is not configured by this: it needs
+    <code>claude mcp add-from-claude-desktop</code>.</p>
 
-    <div class="fill" data-fill="mac-manual">
-      <label>Your IPA username
-        <input type="text" autocomplete="off" spellcheck="false"
-               data-token="&lt;your-ipa-username&gt;"
-               placeholder="jdoe">
-      </label>
-    </div>
-<pre><code id="mac-manual">__CA_BEGIN__
-curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
-echo "__CA_SHA256__  /tmp/realm-ca.crt" | shasum -a 256 -c - \
-  &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
-       -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
+    <h3>Uninstall</h3>
+<pre><code id="mac-uninstall">cd "$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsS __BASE__/uninstall.sh -o uninstall.sh
 
-__CA_END__
-sudo mkdir -p /etc/resolver
-printf 'nameserver __DNS_IP__\n' | sudo tee /etc/resolver/__DOMAIN__ &gt;/dev/null
+sh uninstall.sh                 # print the plan, change nothing
+sh uninstall.sh --yes           # apply it</code></pre>
 
-sudo tee /etc/krb5.conf &gt;/dev/null &lt;&lt;'CONF'
-[libdefaults]
-    default_realm = __REALM__
-    dns_lookup_realm = false
-    dns_lookup_kdc = false
-    rdns = false
-    ticket_lifetime = 24h
-    renew_lifetime = 7d
-    forwardable = false
+    <p class="note"><strong>Run it as yourself, not under <code>sudo</code>.</strong> The manifest
+    that authorises every step lives in your home directory, so under <code>sudo</code> the script
+    looks for it in root's, finds nothing and refuses. It elevates on its own for the steps that
+    need it, which is also why the install above needs no <code>sudo</code>.</p>
 
-[realms]
-    __REALM__ = {
-        kdc = tcp/__KDC__
-        admin_server = __KDC__
-        default_domain = __DOMAIN__
-    }
-
-[domain_realm]
-    .__DOMAIN__ = __REALM__
-    __DOMAIN__ = __REALM__
-CONF
-
-mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh
-cat &gt;&gt; ~/.ssh/config &lt;&lt;'CONF'
-Host *.__DOMAIN__
-    User &lt;your-ipa-username&gt;
-    GSSAPIAuthentication yes
-    GSSAPIDelegateCredentials no
-CONF
-chmod 600 ~/.ssh/config
-
-mkdir -p "$HOME/Library/Application Support/mcp-krb"
-cd "$HOME/Library/Application Support/mcp-krb"
-python3 -m venv venv
-venv/bin/pip install --quiet gssapi
-curl --proto '=https' --tlsv1.2 -fsS -o mcp-krb-bridge.py __BASE__/mcp-krb-bridge.py
-
-claude mcp add --scope user internal-tools -- \
-    "$HOME/Library/Application Support/mcp-krb/venv/bin/python3" \
-    "$HOME/Library/Application Support/mcp-krb/mcp-krb-bridge.py" \
-    __MCP_URL__
-
-kinit &lt;your-ipa-username&gt;@__REALM__
-klist -v</code></pre>
-
-    <p class="note">No <code>claude</code> CLI (desktop app only)? Add the same entry to
-    <code>~/.claude.json</code> under <code>mcpServers</code>, the shape shown in
-    <code>bridge/examples/mcp.json.example</code>, with the two paths above as the command and
-    first argument. Note that the Claude <em>Desktop</em> chat app reads a different file and
-    is not configured by either route.</p>
+    <p class="note">The same script the Linux tab uses: it reads <code>uname</code> and takes the
+    macOS paths, so it removes the kit's tree under <code>~/Library/Application Support/mcp-krb</code>,
+    the split-DNS file in <code>/etc/resolver</code>, and the realm CA from the System keychain,
+    then puts the original <code>krb5.conf</code> back from the copy the installer kept. Nothing
+    was ever added to FreeIPA for a Mac, so there is no host entry to remove and nothing to
+    un-enrol.</p>
   </section>
 
   <div class="rule"></div>

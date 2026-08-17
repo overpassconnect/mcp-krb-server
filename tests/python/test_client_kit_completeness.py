@@ -53,6 +53,22 @@ class TestEverythingShippedIsPublished(unittest.TestCase):
                           "%s is served but verify.sh never confirms it is "
                           "reachable" % name)
 
+    def test_every_top_level_client_script_is_published(self):
+        # Not just the installers. uninstall.sh and uninstall.ps1 sat in the
+        # repository unserved for months while both installers wrote the
+        # manifests only they can read, so the reversal existed nowhere a
+        # provisioned workstation could reach it and the only way off a machine
+        # was to clone the source. Publishing an installer without its
+        # uninstaller is a one-way door, and nothing failed to say so.
+        scripts = sorted(
+            p.name for p in (ROOT / "client").iterdir()
+            if p.is_file() and p.suffix in (".sh", ".ps1"))
+        self.assertIn("uninstall.sh", scripts)      # anti-vacuity
+        missing = [s for s in scripts if s not in bundle_files()]
+        self.assertEqual([], missing,
+                         "client/ holds scripts the publisher never serves, so a "
+                         "workstation cannot fetch them: %s" % missing)
+
 
 class TestEverythingInstalledCanBeRemoved(unittest.TestCase):
     """Anything the installer records as created must be a path uninstall owns."""

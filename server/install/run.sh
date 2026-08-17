@@ -22,7 +22,7 @@ set -eu
 SITE_ENV="${SITE_ENV:-/etc/mcp-server/site.env}"
 FQDN=""; REALM=""; IPA_SERVER=""
 MCP_VENV=""; SVCUSER=""; SVCGROUP=""; WEBROOT=""
-NO_SERVE_CLIENT=0; CLIENT_EXPORT=""
+NO_SERVE_CLIENT=0; CLIENT_EXPORT=""; CLIENT_ONLY=0
 CLIENT_SITE_SECTIONS=""; CLIENT_DOWNLOAD_BASE=""; CLIENT_CA_INSTALL=""; CLIENT_PATH=""; CLIENT_ROOT=""
 CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
@@ -57,6 +57,11 @@ usage: run.sh [options]
   --client-export DIR    also assemble the bundle into DIR, a local folder, for
                          copying off-band to wherever you serve static files.
                          Independent of serving here.  (site.env: CLIENT_EXPORT)
+  --client-only          build the client bundle and nothing else: skip every
+                         server step, touch no system state, need no root, exit
+                         before verify. Requires --client-export. Use it to
+                         regenerate a page for another host without reinstalling
+                         a running server.
   --client-path PATH     URL path when serving, default /client/  (site.env: CLIENT_PATH)
   --client-root DIR      docroot when serving, default /var/www/client
                                                        (site.env: CLIENT_ROOT)
@@ -114,6 +119,7 @@ while [ $# -gt 0 ]; do
         --no-serve-client)  NO_SERVE_CLIENT=1 ;;
         --client-site-sections)   CLIENT_SITE_SECTIONS="$2"; shift ;;
         --client-site-sections=*) CLIENT_SITE_SECTIONS="${1#--client-site-sections=}" ;;
+        --client-only)      CLIENT_ONLY=1 ;;
         --client-export)    CLIENT_EXPORT="$2"; shift ;;
         --client-export=*)  CLIENT_EXPORT="${1#--client-export=}" ;;
         --client-path)      CLIENT_PATH="$2"; shift ;;
@@ -436,6 +442,16 @@ if [ -n "$CLIENT_EXPORT" ]; then
         *) die "--client-export must be an absolute path (got '$CLIENT_EXPORT')" ;;
     esac
 fi
+if [ "$CLIENT_ONLY" = 1 ]; then
+    [ -n "$CLIENT_EXPORT" ] || die "--client-only needs --client-export DIR: with no server
+  being installed there is nowhere else for the bundle to go."
+    # Serving locally means writing into this host's nginx docroot, and the
+    # steps that create and configure that vhost are the ones being skipped.
+    # Forced off rather than left to the default, so a --client-only run never
+    # drops a bundle into a path nothing on this machine serves. Resolution of
+    # SERVE_CLIENT happens above, so this is the last word on it.
+    SERVE_CLIENT=no
+fi
 
 # site.env is sourced without exporting, so REALM is exported explicitly, after
 # resolution: what crosses into anything this script runs is the value this run
@@ -488,7 +504,10 @@ say "cert mode: $CERT_MODE"
 # --------------------------------------------------------------------------
 step "0. preflight"
 
-[ "$(id -u)" = 0 ] || die "must run as root"
+# --client-only writes one directory and touches no system state, so it needs no
+# privileges. assert_root_owned_tree below still applies to it: see the note
+# above step 1 for why dropping root does not mean dropping source integrity.
+[ "$CLIENT_ONLY" = 1 ] || [ "$(id -u)" = 0 ] || die "must run as root"
 
 assert_root_owned_tree "$SRC"
 say "PASS source tree $SRC, every path inside it, and every parent are root-owned"
@@ -610,6 +629,29 @@ import sys
 sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PY
 say "PASS python3 >= 3.11"
+
+# --------------------------------------------------------------------------
+# Steps 1 to 9a build and activate the SERVER. --client-only skips all of them
+# and falls through to 9b, which is the only part that produces files for other
+# machines.
+#
+# It exists because publishing a page should not require reinstalling a server.
+# Without it the only way to regenerate the client bundle was a full converging
+# run: packages, service account, venv, keytab, unit, vhost, certificate, then a
+# systemctl restart. That is a live service interruption to rebuild static HTML,
+# so in practice nobody ran it and the published page drifted from the
+# repository by hand instead. The whole point of 9b's export is off-band
+# copying to a host that serves the bundle, and that host is usually not this
+# one.
+#
+# What it deliberately does NOT skip is assert_root_owned_tree in step 0. The
+# bundle is scripts that run as root on every workstation that fetches them, so
+# the source-tree integrity SECURITY.md [SC1] rests on matters exactly as much
+# here as for a server install. Root privileges are dropped (reading a
+# root-owned tree and writing an export directory needs none); the integrity
+# requirement is not.
+# --------------------------------------------------------------------------
+if [ "$CLIENT_ONLY" = 0 ]; then
 
 # --------------------------------------------------------------------------
 # 1. PACKAGES
@@ -1725,6 +1767,9 @@ run systemctl reload nginx 2>/dev/null || run systemctl restart nginx
 #     that does not resolve makes authorize_tool() fail closed, so the
 #     deployment looks healthy while denying every tool to every user.
 # --------------------------------------------------------------------------
+
+fi   # end of the server steps skipped by --client-only
+
 # --------------------------------------------------------------------------
 # 9b. CLIENT BUNDLE (served here by default, exported for off-band copying, or
 #     both). Placed after activate so the vhost that serves it is already live,
@@ -1751,7 +1796,15 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
     # config.js writing live in one place. config.js is written by write_config
     # below rather than copied, so config.example.js ships as the shape
     # reference and the live config.js is generated per install.
-    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 bridge/mcp-krb-bridge.py bridge/mcp-krb-remote-bridge.py bridge/mcp-fetch web/index.html web/app.js web/config.example.js"
+    #
+    # The uninstallers are payload, not documentation. They were absent from this
+    # list for months while both installers dutifully wrote the manifests that
+    # only they can read, so the reversal existed in the repository and on no
+    # workstation: the only way off a provisioned machine was to clone the source.
+    # A published installer with no published uninstaller is a one-way door.
+    # test_client_kit_completeness.py now fails if any top-level client script is
+    # missing here, which is the general form of that bug.
+    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 uninstall.sh uninstall.ps1 bridge/mcp-krb-bridge.py bridge/mcp-krb-remote-bridge.py bridge/mcp-fetch web/index.html web/app.js web/config.example.js"
     # Injects the site fragment into the page's markers and derives one nav
     # entry per section from its id and <h2>. Refuses a fragment that is not
     # root-owned or is group/world-writable: it becomes markup on the page that
@@ -1920,6 +1973,17 @@ PY
             say "  files. The page infers its own URL, so there is no per-host config."
         fi
     fi
+fi
+
+if [ "$CLIENT_ONLY" = 1 ]; then
+    # Step 10 verifies a running server on this host. There is none, and every
+    # step that would have made one was skipped, so stopping here is the honest
+    # end of a --client-only run rather than a verifier reporting failures for
+    # things it was never asked to install.
+    say ""
+    say "--client-only: the server was not touched. Nothing here is live until the"
+    say "exported directory is copied to the host that serves it."
+    exit 0
 fi
 
 step "10. verify"
