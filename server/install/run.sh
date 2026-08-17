@@ -28,6 +28,7 @@ CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
 CERT_MODE="acme"; CERT_PATH=""; WHEELHOUSE=""
 ROTATE_KEYTAB=0; CREATE_IPA_SERVICE=0; DRY_RUN=0; FORCE_UNIT=0; ENABLE_AUTHZ_EDITOR=0
+DISABLE_AUTHZ_EDITOR=0
 
 usage() {
     cat <<'USAGE'
@@ -95,6 +96,10 @@ usage: run.sh [options]
                          authorization, so whoever runs the installer must ask
                          for it, and automation driven from a config file cannot
                          turn it on. Requires MCP_POLICY_ADMINS in site.env.
+  --disable-authz-editor turn the editor off on a host where it is currently on.
+                         Needed because a plain re-run refuses to disable it
+                         silently; turning a live feature off is as deliberate a
+                         decision as turning it on.
   --dry-run              print what would change, mutate nothing
   -h, --help             this text
 
@@ -144,6 +149,7 @@ while [ $# -gt 0 ]; do
         --create-ipa-service) CREATE_IPA_SERVICE=1 ;;
         --force-unit)       FORCE_UNIT=1 ;;
         --enable-authz-editor) ENABLE_AUTHZ_EDITOR=1 ;;
+        --disable-authz-editor) DISABLE_AUTHZ_EDITOR=1 ;;
         --dry-run)          DRY_RUN=1 ;;
         -h|--help)          usage; exit 0 ;;
         *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -1148,6 +1154,31 @@ case "${MCP_AUTHZ_EDITOR:-}" in
   parameter file makes on their behalf. Remove it from site.env and pass
   --enable-authz-editor instead." ;;
 esac
+
+# Refuse to turn the editor OFF by omission. The flag being a flag is what keeps
+# a config file from switching it on; the cost is that a plain re-run, which is
+# how every other setting converges, silently switched it off. That happened: a
+# routine re-run to deploy a code fix took the editor down, and the only symptom
+# was a 404 on a page nobody was looking at. The policy file was untouched but
+# unread, so the in-code defaults were live instead of the site's, which is a
+# silent authorization change.
+#
+# So disabling is now as deliberate as enabling. Nothing is inferred from
+# site.env here, which would re-open the hole the case above closes: the check
+# reads the INSTALLED UNIT, i.e. the state this host is actually in.
+if [ "$ENABLE_AUTHZ_EDITOR" != 1 ] && [ "$DISABLE_AUTHZ_EDITOR" != 1 ] \
+   && [ -f "$UNIT" ] && grep -q '^Environment=MCP_AUTHZ_EDITOR=1' "$UNIT"; then
+    die "the policy editor is ON on this host, and this run would turn it off.
+
+  Nothing on the command line asked for that, and it is not a safe default: with
+  the editor off the server stops reading $MCP_POLICY_FILE, so the reviewed
+  in-code defaults become the live policy. Every tool whose access the editor was
+  managing silently changes hands.
+
+  Pick one, explicitly:
+    --enable-authz-editor    keep it on   (the usual answer when re-running)
+    --disable-authz-editor   turn it off  (say so and it will)"
+fi
 
 if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
     [ -n "$MCP_POLICY_ADMINS" ] || die "--enable-authz-editor needs MCP_POLICY_ADMINS in $SITE_ENV.
