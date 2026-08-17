@@ -395,6 +395,101 @@ class NarrowEvidenceCheck(Base):
             fake_gssapi.raw = saved
 
 
+class NarrowEvidenceAdversarial(Base):
+    """Attacks on is_narrow_evidence, whose failure is the one that is not
+    contained. Everywhere else a mistake denies something that should work. Here,
+    a single wrong True means a modified client's forwarded TGT is treated as our
+    own evidence credential, and the delegation allowlist stops meaning anything:
+    the caller reaches whatever their own ticket reaches.
+
+    The invariant asserted below is NOT "returns False". It is **never returns
+    True**. On a platform that answers nonsense, raising is an acceptable
+    outcome, because the exception denies the forward. Quietly answering yes is
+    not. So a shape that crashes passes these tests and a shape that says True
+    fails them.
+
+    What these tests cannot establish: that MIT never populates the impersonator
+    field from anything that arrived over the wire. That is a property of
+    kg_compose_deleg_cred() in C, and it was settled by measurement against a
+    live KDC rather than here. These tests cover everything on this side of that
+    boundary.
+    """
+
+    def _returns(self, payload):
+        """Force inquire_cred_by_oid to return `payload`, whatever its shape."""
+        saved = fake_gssapi.raw
+
+        class Fixed:
+            @staticmethod
+            def inquire_cred_by_oid(cred, oid):
+                return payload
+
+        fake_gssapi.raw = Fixed()
+        self.addCleanup(setattr, fake_gssapi, 'raw', saved)
+
+    def _never_true(self, payload, why):
+        self._returns(payload)
+        try:
+            got = delegation.is_narrow_evidence(self.evidence_for(), self.IMPERSONATOR)
+        except Exception:
+            return          # denied by raising, which is fail-closed
+        self.assertFalse(got, why)
+
+    # --- the battery is only meaningful if the genuine case still passes ------
+
+    def test_control_the_real_credential_is_still_accepted(self):
+        self.assertTrue(delegation.is_narrow_evidence(
+            self.evidence_for(), self.IMPERSONATOR),
+            'the attack battery would be vacuous if nothing is ever accepted')
+
+    # --- malformed return shapes ---------------------------------------------
+
+    def test_no_buffers(self):
+        self._never_true([], 'an empty answer is not a positive one')
+
+    def test_two_buffers_even_when_one_matches(self):
+        want = self.IMPERSONATOR.encode()
+        self._never_true([want, want], 'exactly one buffer is the contract')
+
+    def test_buffer_that_is_text_rather_than_bytes(self):
+        self._never_true([self.IMPERSONATOR], 'str has no decode; must not pass')
+
+    def test_buffer_that_is_not_valid_utf8(self):
+        self._never_true([b'\xff\xfe\x00'], 'undecodable bytes must not pass')
+
+    def test_return_value_with_no_length(self):
+        self._never_true(object(), 'a shapeless answer must not pass')
+
+    def test_return_value_is_none(self):
+        self._never_true(None, 'no answer at all must not pass')
+
+    # --- near misses on the name. This is the actual security property: the
+    # --- comparison is equality against OUR spn, not a prefix, substring or
+    # --- case-folded match.
+
+    def test_near_miss_names_are_all_refused(self):
+        base = self.IMPERSONATOR
+        for name, why in (
+            (base + '\x00',            'a trailing NUL must not compare equal'),
+            (base + '\n',              'trailing whitespace must not compare equal'),
+            (base + ' ',               'trailing space must not compare equal'),
+            (base + 'X',               'a longer name must not pass a prefix check'),
+            (base[:-1],                'a shorter name must not pass a prefix check'),
+            (base.lower(),             'case must matter: krb5 names are case sensitive'),
+            (base.split('@')[0],       'the service part alone must not pass a substring check'),
+            ('@' + base.split('@')[1], 'the realm alone must not pass a substring check'),
+            ('HTTP/evil.example.internal@' + base.split('@')[1],
+                                       'another service in our own realm must not pass'),
+        ):
+            with self.subTest(name=name):
+                self._never_true([name.encode()], why)
+
+    def test_our_own_name_from_a_different_realm_is_refused(self):
+        svc = self.IMPERSONATOR.split('@')[0]
+        self._never_true([(svc + '@OTHER.INTERNAL').encode()],
+                         'same service, foreign realm, is a different principal')
+
+
 class SpnegoFraming(unittest.TestCase):
     """The header must carry a SPNEGO token, not a bare krb5 AP-REQ.
 
