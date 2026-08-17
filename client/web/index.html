@@ -262,33 +262,52 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
 
 .\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
     -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
-    -BaseUrl __BASE__ -McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__</code></pre>
+    -BaseUrl __BASE__ -McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__ __FWD_PS__</code></pre>
     <p class="note">That sets up all three pieces: Kerberos SSH through WSL2, VS Code Remote-SSH
     with <code>remote.SSH.path</code> pointed at a dispatcher so <code>*.__DOMAIN__</code> goes
     through WSL while every other host keeps using the native Windows <code>ssh</code>, and the
     MCP bridge. One profile, both worlds, nothing to run afterwards.</p>
 
-    <p class="note"><strong>Add <code>-Forwardable</code> if the MCP tools here act on your
-    behalf.</strong> Some tools reach another service <em>as you</em>, so that the far end logs
-    the real person instead of a shared service account. The Kerberos mechanism behind that
-    refuses to work unless your own ticket is forwardable, and the switch is off by default
-    because a fleet that does not need it is safer without it: a non-forwardable ticket cannot
-    be handed on even by a client that tries to.</p>
+    <p class="note">If <code>-Forwardable</code> appears in the command above, this deployment
+    has tools that act <em>as you</em> on another service, so the far end logs the real person
+    rather than a shared service account. That mechanism refuses to work unless your own ticket
+    is forwardable, so the switch is part of the command rather than something to remember. If
+    it is absent, this deployment does not forward and the stronger default applies: a
+    non-forwardable ticket cannot be handed on even by a client that tries to.</p>
 
-    <p class="note">Get this wrong and nothing fails now. It fails much later, on the first
-    such tool, with <code>cannot act on your behalf</code>, which does not point here. Ask
-    whoever runs the MCP host whether this deployment uses on-behalf-of forwarding; if it does,
-    append <code>-Forwardable</code> to the command above. Changing it afterwards means re-running
-    with the switch, then <code>wsl kdestroy</code> and a fresh <code>kinit</code>, because the
-    flag is fixed into the ticket when it is issued.</p>
+    <p class="note">Either way, do not add or remove it by hand. It is filled in from the MCP
+    server's own configuration, so it already matches what the server does. Getting it wrong
+    fails nothing at install time and then fails much later, on the first such tool, with
+    <code>cannot act on your behalf</code>, which points at neither the command nor the server.
+    If it ever needs changing, re-run with the switch and then <code>wslkdestroy</code> and a
+    fresh <code>wslkinit</code>, because the flag is fixed into the ticket when it is issued.</p>
 
-    <p class="note">Afterwards, in a <em>new</em> terminal:
-    <code>wsl kinit &lt;your-ipa-username&gt;@__REALM__</code>, then
+    <p class="note">Afterwards, in a <em>new</em> terminal: <code>wslkinit</code>, then
     <code>wslssh host.__DOMAIN__</code>. Your existing <code>ssh</code>, keys, host aliases and
     <code>known_hosts</code> are left untouched: the script adds <code>wslssh</code> rather than
-    hijacking <code>ssh</code>. Tickets last 24 hours and renew with <code>wsl kinit -R</code>.
-    Check what you got with <code>wsl klist -f</code>: the flags show <code>F</code> when the
-    ticket is forwardable.</p>
+    hijacking <code>ssh</code>.</p>
+
+    <p class="note"><strong>What you get in PowerShell.</strong> Six functions are added to your
+    profile. Everything Kerberos happens inside WSL, because that is where the ticket lives, and
+    these save you spelling that out every time. Your own <code>ssh</code> and <code>git</code>
+    are untouched.</p>
+<pre><code id="win-aliases">wslkinit          # get a ticket. No arguments: your principal is already filled in
+wslkinit -R       # renew it. Tickets last 24 hours, renewable for 7 days
+wslklist          # what you hold, and its flags
+wslkdestroy       # drop it
+
+wslssh host.__DOMAIN__                  # SSH, no password
+wslgit clone https://git.__DOMAIN__/... # git over the realm
+mcp-fetch &lt;url&gt; -o C:\path\file        # fetch from a Kerberized service</code></pre>
+
+    <p class="note"><code>wslkinit</code> with no arguments uses your own principal in
+    <code>__REALM__</code>, which is the part people get wrong: <code>kinit yourname</code> alone
+    succeeds against the local default realm and hands you a ticket for the wrong principal that
+    then fails at a service naming neither. Pass arguments and they go through, so
+    <code>wslkinit -R</code> renews and <code>wslkinit someone.else@__REALM__</code> works.</p>
+
+    <p class="note">Check what you hold with <code>wslklist</code>. The flags show <code>F</code>
+    when the ticket is forwardable.</p>
 
     <p class="note">Take <code>-CaSha256</code> from <code>sha256sum /etc/ipa/ca.crt</code> on an
     enrolled host, or from IT, rather than the copy printed on this page. It is what makes the
@@ -413,7 +432,7 @@ sh setup-macos.sh \
     --ipa-user &lt;your-ipa-username&gt; \
     --base-url __BASE__ \
     --mcp-url __MCP_URL__ \
-    __CA_ARG__
+    __CA_ARG__ __FWD_SH__
 
 kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
 
@@ -432,19 +451,18 @@ kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
     <code>remote.SSH.*</code> settings on the Windows tab exist only to push <code>ssh</code>
     across the WSL boundary, and a Mac's own <code>ssh</code> already speaks GSSAPI.</p>
 
-    <p class="note"><strong>Add <code>--forwardable</code> if the MCP tools here act on your
-    behalf.</strong> Same rule as the Windows tab, same reason: a tool that reaches another
-    service <em>as you</em> needs your own ticket to be forwardable, and it is off by default
-    because a fleet that does not need it is safer without it. Without the switch nothing fails
-    at install time; the first such tool later reports <code>cannot act on your behalf</code>,
-    which does not point back here. Ask whoever runs the MCP host whether this deployment
-    forwards.</p>
+    <p class="note">If <code>--forwardable</code> appears in the command above, the same applies
+    as on the Windows tab: this deployment has tools that act <em>as you</em> on another service,
+    and that needs your own ticket to be forwardable. It is filled in from the MCP server's own
+    configuration, so do not add or remove it by hand. Absent means this deployment does not
+    forward, and the stronger default applies.</p>
 
     <p class="note">Check what you got with <code>klist -v</code> and look for the forwardable
     flag. Note the spelling: this is Heimdal, so <code>klist -f</code> is the MIT form and not
-    what it understands. Changing the setting later means re-running with
-    <code>--forwardable</code>, then <code>kdestroy</code> and a fresh <code>kinit</code>, since
-    the flag is fixed into the ticket when it is issued.</p>
+    what it understands. If it ever needs changing, re-run with <code>--forwardable</code>, then
+    <code>kdestroy</code> and a fresh <code>kinit</code>, since the flag is fixed into the ticket
+    when it is issued. Getting it wrong fails nothing now and later fails every such tool with
+    <code>cannot act on your behalf</code>.</p>
 
     <p class="note">Registration goes into <code>~/.claude.json</code>, which the script writes
     itself, so no <code>claude</code> CLI is needed. The Claude <em>Desktop</em> chat app is a

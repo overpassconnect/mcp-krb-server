@@ -21,6 +21,10 @@ window.SITE = {
   supportEmail: '',                       // optional; blank leaves a generic "contact your IT team"
   caInstall: true,                        // false where the CA arrives by MDM or a golden image:
                                           // the page then drops the trust step and passes --skip-ca
+  delegation: false,                      // true where the server runs MCP_DELEGATION=1: the page's
+                                          // install commands then carry -Forwardable / --forwardable,
+                                          // which on-behalf-of tools require. run.sh derives this from
+                                          // the server, so do not set it by hand on a generated config
   downloadBase: ''                        // optional; only when the files are NOT beside the page.
                                           // '/d' or a full URL. Blank means: same directory as this page.
 };

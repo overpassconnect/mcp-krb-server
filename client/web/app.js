@@ -63,7 +63,22 @@
     '__CA_ARG__': (SITE.caInstall === false)
       ? '--skip-ca'
       : '--ca-sha256 ' + (SITE.caSha256 || '<set caSha256 in config.js>'),
-    '__DNS_IP__': SITE.dnsIp || '<set dnsIp in config.js>'
+    '__DNS_IP__': SITE.dnsIp || '<set dnsIp in config.js>',
+    /* On-behalf-of forwarding needs the caller's own ticket to be forwardable,
+     * and the installers write that line of krb5.conf off by default, which is
+     * the right default for a fleet that does not forward. The two facts live on
+     * different machines, so they drifted: a server with MCP_DELEGATION=1 served
+     * a command guaranteeing delegation could not work, and the contradiction
+     * surfaced days later on a developer's laptop as "cannot act on your behalf",
+     * which points at neither.
+     *
+     * So the command carries the switch when, and only when, this deployment
+     * actually forwards. run.sh derives `delegation` from MCP_DELEGATION, so
+     * nobody has to know the flag exists and the two cannot disagree again.
+     * Absent means false, which keeps every existing config.js rendering exactly
+     * the command it renders today. */
+    '__FWD_PS__': (SITE.delegation === true) ? '-Forwardable' : '',
+    '__FWD_SH__': (SITE.delegation === true) ? '--forwardable' : ''
   };
 
   /* The CA stanza is bracketed by markers rather than commented out, because

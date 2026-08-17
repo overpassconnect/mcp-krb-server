@@ -56,6 +56,53 @@ class BothKitsCanOptIn(unittest.TestCase):
         self.assertRegex(PS1, r"\$fwd = if \(\$Forwardable\) \{ 'true' \} else \{ 'false' \}")
 
 
+class TheCommandCarriesIt(unittest.TestCase):
+    """Documenting it was not enough, so the command itself carries it.
+
+    A note asking someone to append a flag only works on the people who read
+    notes. The switch is now rendered into the install command from the server's
+    own MCP_DELEGATION, so a developer who copies and pastes gets the correct
+    command for this deployment without knowing the flag exists, and the two
+    facts cannot drift apart because one is derived from the other."""
+
+    APP = (ROOT / "client" / "web" / "app.js").read_text(encoding="utf-8")
+    RUN = (ROOT / "server" / "install" / "run.sh").read_text(encoding="utf-8")
+    EXAMPLE = (ROOT / "client" / "web" / "config.example.js").read_text(encoding="utf-8")
+
+    def test_the_windows_command_carries_the_token(self):
+        self.assertIn("__FWD_PS__", section(PAGE, "windows"))
+
+    def test_the_macos_command_carries_the_token(self):
+        self.assertIn("__FWD_SH__", section(PAGE, "macos"))
+
+    def test_the_tokens_are_inside_the_install_command_not_the_prose(self):
+        for cid, token in (("win-cmd", "__FWD_PS__"), ("mac-script", "__FWD_SH__")):
+            m = re.search(r'<pre><code id="%s">(.*?)</code></pre>' % cid, PAGE, re.S)
+            self.assertIsNotNone(m, "no code block id=%r" % cid)
+            self.assertIn(token, m.group(1),
+                          "%s is somewhere on the page but not in the command people "
+                          "copy, which is the only place that helps" % token)
+
+    def test_app_js_renders_them_from_the_site_flag(self):
+        self.assertRegex(self.APP, r"'__FWD_PS__':\s*\(SITE\.delegation === true\)")
+        self.assertRegex(self.APP, r"'__FWD_SH__':\s*\(SITE\.delegation === true\)")
+
+    def test_absent_delegation_renders_nothing(self):
+        # An existing config.js predates this key. It must keep rendering exactly
+        # the command it renders today rather than silently gaining a flag.
+        self.assertRegex(self.APP, r"'__FWD_PS__':.*?:\s*''")
+        self.assertRegex(self.APP, r"'__FWD_SH__':.*?:\s*''")
+
+    def test_run_sh_derives_it_from_the_server_rather_than_a_separate_setting(self):
+        self.assertRegex(self.RUN, r'printf "  delegation: %s\\n".*MCP_DELEGATION')
+
+    def test_the_example_config_documents_the_key(self):
+        # re.compile, not a third positional argument: assertRegex takes msg
+        # there, so a bare re.M silently becomes the failure message and the
+        # pattern runs unanchored.
+        self.assertRegex(self.EXAMPLE, re.compile(r"^\s*delegation:", re.M))
+
+
 class ThePageSaysSo(unittest.TestCase):
     """The page is the only one of these a person installing actually reads."""
 

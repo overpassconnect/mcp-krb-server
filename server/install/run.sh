@@ -1974,6 +1974,15 @@ PY
             # Drives whether the page shows the CA step at all, and which
             # argument the macOS command carries.
             printf "  caInstall: %s\n" "$([ "$CLIENT_CA_INSTALL" = yes ] && echo true || echo false)"
+            # Whether this deployment forwards on behalf of callers, taken from
+            # the server's own MCP_DELEGATION rather than configured twice. When
+            # it is on, the page's install commands carry -Forwardable and
+            # --forwardable, because evidence-based S4U2Proxy hard-requires a
+            # forwardable caller ticket and the installers write that off by
+            # default. Deriving it is the point: a server that forwards used to
+            # serve a command that guaranteed forwarding could not work, and the
+            # mismatch surfaced days later as "cannot act on your behalf".
+            printf "  delegation: %s\n" "$([ "${MCP_DELEGATION:-0}" = 1 ] && echo true || echo false)"
             printf '%s\n' "};"
         } > "$1/config.js"
         chmod 0644 "$1/config.js"

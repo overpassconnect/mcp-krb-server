@@ -43,6 +43,29 @@ def uninstall_markers():
     return re.findall(r"'(#[^']*)'", m.group(1))
 
 
+class ThePageTeachesTheHelpers(unittest.TestCase):
+    """The page kept teaching the long form after the short one existed.
+
+    `wsl kinit user@REALM` still works, so nothing failed and nothing flagged it.
+    The helper was simply undiscoverable to anyone who provisioned from the page
+    rather than reading setup.ps1, which is everyone."""
+
+    PAGE = (ROOT / "client" / "web" / "index.html").read_text(encoding="utf-8")
+
+    def test_the_page_does_not_teach_the_long_form(self):
+        for stale in ("wsl kinit", "wsl klist", "wsl kdestroy"):
+            self.assertNotIn(
+                stale, self.PAGE,
+                "the page still teaches %r, which setup.ps1 replaced with a "
+                "profile function" % stale)
+
+    def test_every_function_the_installer_writes_is_shown(self):
+        for name, _marker in WRITES:
+            self.assertIn(name, self.PAGE,
+                          "setup.ps1 adds %s to the user's profile and the page "
+                          "never mentions it, so nobody knows it exists" % name)
+
+
 class TestProfileFunctionsAreTracked(unittest.TestCase):
 
     def test_setup_writes_functions_this_test_can_see(self):
