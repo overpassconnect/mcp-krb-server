@@ -108,6 +108,22 @@
     codes[i].textContent = applySite(codes[i].textContent);
   }
 
+  /* A code block whose whole content was a CA stanza is now empty, because
+   * caInstall is false on this deployment. Leave it in place and the page shows
+   * an empty grey box with a copy button that copies nothing. Hide the <pre>,
+   * and the note that introduces it, so the step disappears rather than
+   * appearing broken. Only ever hides blocks that are ACTUALLY empty, so a
+   * deployment that installs the CA is untouched. */
+  var pres = document.querySelectorAll('pre');
+  for (var p = 0; p < pres.length; p++) {
+    var c = pres[p].querySelector('code');
+    if (c && c.textContent.trim() === '') {
+      pres[p].style.display = 'none';
+      var prev = pres[p].previousElementSibling;
+      if (prev && prev.classList.contains('note')) { prev.style.display = 'none'; }
+    }
+  }
+
   /* 2a. org name onto the title and the logo alt text. */
   if (SITE.orgName) {
     document.title = 'Machine provisioning | ' + SITE.orgName;

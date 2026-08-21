@@ -414,14 +414,21 @@ iwr -useb "$base/uninstall.ps1" -OutFile uninstall.ps1
                placeholder="jdoe">
       </label>
     </div>
-<pre><code id="mac-script">__CA_BEGIN__
+    <p class="note"><strong>Paste this block on its own and let it finish.</strong> It ends at an
+    authentication prompt deliberately. Trusting the CA needs <code>sudo</code>, and on a Mac that
+    may be a password, Touch ID, or a keychain authorisation dialog. Anything pasted behind it sits
+    in the terminal's input queue, where the prompt consumes it instead of your password and every
+    line after is silently lost. That is why this is separate.</p>
+<pre><code id="mac-ca">__CA_BEGIN__
 curl -fsS -o /tmp/realm-ca.crt http://__KDC__/ipa/config/ca.crt
 echo "__CA_SHA256__  /tmp/realm-ca.crt" | shasum -a 256 -c - \
   &amp;&amp; sudo security add-trusted-cert -d -r trustRoot \
        -k /Library/Keychains/System.keychain /tmp/realm-ca.crt
+__CA_END__</code></pre>
 
-__CA_END__
-cd "$(mktemp -d)"
+    <p class="note">It should end with <code>/tmp/realm-ca.crt: OK</code>. Once it has, paste the
+    rest below.</p>
+<pre><code id="mac-script">cd "$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup-macos.sh -o setup-macos.sh
 
 sh setup-macos.sh \
@@ -432,9 +439,11 @@ sh setup-macos.sh \
     --ipa-user &lt;your-ipa-username&gt; \
     --base-url __BASE__ \
     --mcp-url __MCP_URL__ \
-    __CA_ARG__ __FWD_SH__
+    __CA_ARG__ __FWD_SH__</code></pre>
 
-kinit &lt;your-ipa-username&gt;@__REALM__</code></pre>
+    <p class="note">Then, once it finishes, get a ticket:</p>
+<pre><code id="mac-kinit">kinit &lt;your-ipa-username&gt;@__REALM__
+klist -v</code></pre>
 
     <p class="note">The <code>&amp;&amp;</code> on the third line is load-bearing: a hash that
     does not match leaves the certificate untrusted, and the <code>curl</code> below it then
