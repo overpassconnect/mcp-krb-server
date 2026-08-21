@@ -185,25 +185,41 @@
   var pres = document.querySelectorAll('pre');
   for (var p = 0; p < pres.length; p++) { addCopy(pres[p]); }
 
-  /* 4b. local placeholder fill. Any <div class="fill" data-fill="ID"> drives the
+  /* 4b. local placeholder fill. A <div class="fill" data-fill="ID"> drives the
    *     <code id="ID"> below it. Each <input data-token="..."> replaces that
    *     literal token in the command. The template captured here is already
-   *     site-filled by step 1, so the two layers compose. */
+   *     site-filled by step 1, so the two layers compose.
+   *
+   *     data-fill takes a SPACE-SEPARATED LIST, because one answer often belongs
+   *     in more than one block. The macOS tab asks for a username once and needs
+   *     it in both the install command and the kinit below it. It was a single
+   *     id until those were split into separate paste blocks, at which point the
+   *     second silently stopped filling and still read <your-ipa-username>: the
+   *     input looked like it worked, because the block above it did. */
   var groups = document.querySelectorAll('[data-fill]');
   for (var g = 0; g < groups.length; g++) {
     (function (group) {
-      var target = document.getElementById(group.getAttribute('data-fill'));
-      if (!target) { return; }
-      var template = target.textContent;      // captured after site-fill
+      var ids = group.getAttribute('data-fill').split(/\s+/);
+      var targets = [], templates = [];
+      for (var n = 0; n < ids.length; n++) {
+        if (!ids[n]) { continue; }
+        var el = document.getElementById(ids[n]);
+        if (!el) { continue; }
+        targets.push(el);
+        templates.push(el.textContent);       // captured after site-fill
+      }
+      if (!targets.length) { return; }
       var fields = group.querySelectorAll('input[data-token]');
       function fill() {
-        var out = template;
-        for (var k = 0; k < fields.length; k++) {
-          var token = fields[k].getAttribute('data-token');
-          var val = fields[k].value.trim();
-          if (val) { out = out.split(token).join(val); }
+        for (var t = 0; t < targets.length; t++) {
+          var out = templates[t];
+          for (var k = 0; k < fields.length; k++) {
+            var token = fields[k].getAttribute('data-token');
+            var val = fields[k].value.trim();
+            if (val) { out = out.split(token).join(val); }
+          }
+          targets[t].textContent = out;
         }
-        target.textContent = out;
       }
       for (var k = 0; k < fields.length; k++) {
         fields[k].addEventListener('input', fill);
