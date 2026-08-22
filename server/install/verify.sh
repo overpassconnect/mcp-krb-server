@@ -539,12 +539,27 @@ def collect(mapping):
 # and the check reported the whole policy unreadable while the running server
 # was applying it perfectly. Read the registrations out of the site file so the
 # known set here matches the one the server builds.
+#
+# Scan the whole DIRECTORY, not only the file MCP_SITE_TOOLS names. The loader
+# takes exactly one file, so any deployment with more than a handful of tools
+# ends up with that file as a barrel importing siblings beside it, and most of
+# the registrations live in the siblings. Reading only the named file found 4 of
+# 16 on a real host and failed this check on tools the running server was
+# serving perfectly, which is the worst kind of red: it teaches people to ignore
+# the verifier.
 known = set(authz.TOOL_GROUPS)
 site = os.environ.get('MCP_SITE_TOOLS_FILE', '')
 if site and os.path.exists(site):
-    with open(site, 'r', encoding='utf-8') as fh:
-        known.update(re.findall(r"register_tool_policy\(\s*['\"]([A-Za-z0-9_]+)['\"]",
-                                fh.read()))
+    _dir = os.path.dirname(os.path.abspath(site))
+    for _name in sorted(os.listdir(_dir)):
+        if not _name.endswith('.py'):
+            continue
+        try:
+            with open(os.path.join(_dir, _name), 'r', encoding='utf-8') as fh:
+                known.update(re.findall(
+                    r"register_tool_policy\(\s*['\"]([A-Za-z0-9_]+)['\"]", fh.read()))
+        except OSError:
+            pass   # unreadable sibling; the overlay check below reports the effect
 
 # The EFFECTIVE policy, defaults with the overlay merged over the top, which is
 # what the server builds and therefore what actually decides access. Taking the
