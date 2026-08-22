@@ -414,12 +414,17 @@ _HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
-<h1>Per-tool IPA-group policy</h1>
+<h1>Per-tool authorization</h1>
 <div class="meta">
   Signed in as <code>%PRINCIPAL%</code> &middot; origin <code>%ORIGIN%</code><br>
-  Each tool maps to a JSON array of IPA group names (member of ANY grants access),
-  or <code>"%ANYTOKEN%"</code> for any authenticated principal. Only registered
-  tools are accepted; omitted tools keep their reviewed code default.
+  Each tool maps to an object:
+  <code>{"groups": ["ipa-group", ...], "forwards_to": "svc@fqdn"}</code>.
+  <b>groups</b> is who may call it, a member of ANY listed group gets access, or
+  <code>"%ANYTOKEN%"</code> for any authenticated principal.
+  <b>forwards_to</b> is optional and is where that tool may send the caller's
+  identity downstream; omit it and the tool may not forward at all, which is the
+  default. Only registered tools are accepted; omitted tools keep their reviewed
+  code default.
 </div>
 <div class="wrap">
   <div>
@@ -531,10 +536,22 @@ _HTML = r"""<!doctype html>
   // tool to array of group strings - so a quoted token followed by a colon is
   // a tool name and nothing else can be.
   var KEY = /"((?:\\.|[^"\\])*)"\s*:/g;
-  function namedInText() {
+  // Each tool now maps to an OBJECT, so a naive scan also matches its inner
+  // keys and would list "groups" and "forwards_to" as unregistered tools.
+  // Parse when the document parses; fall back to scanning while it is being
+  // typed, skipping the reserved names. Imperfect for a tool literally called
+  // "groups", and worth it: the server refuses an unregistered name anyway.
+  var INNER = { groups: true, forwards_to: true };
+  function namedInText(parsed) {
     var found = Object.create(null), m;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      Object.keys(parsed).forEach(function (k) { found[k] = true; });
+      return found;
+    }
     KEY.lastIndex = 0;
-    while ((m = KEY.exec(ta.value)) !== null) { found[m[1]] = true; }
+    while ((m = KEY.exec(ta.value)) !== null) {
+      if (!INNER[m[1]]) { found[m[1]] = true; }
+    }
     return found;
   }
   function li(name, cls, detail) {
@@ -566,12 +583,21 @@ _HTML = r"""<!doctype html>
     ta.setSelectionRange(at, at + needle.length);
     paint();
   }
+  // "developers, sysadmins" or "developers, sysadmins -> HTTP@git.internal".
+  // String(record) reads [object Object], which is worse than showing nothing.
+  function describe(v) {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) { return String(v); }
+    var g = v.groups;
+    var out = Array.isArray(g) ? g.join(", ") : (g === undefined ? "" : String(g));
+    if (v.forwards_to) { out += " -> " + v.forwards_to; }
+    return out;
+  }
   function renderTools() {
-    var named = namedInText();
     // The value is only knowable when the document parses; the membership is
     // always knowable. Showing one without the other beats showing neither.
     var parsed = null;
     try { parsed = JSON.parse(ta.value); } catch (e) { parsed = null; }
+    var named = namedInText(parsed);
 
     onEl.textContent = "";
     offEl.textContent = "";
@@ -580,7 +606,7 @@ _HTML = r"""<!doctype html>
     TOOLS.forEach(function (t) {
       if (named[t]) {
         var v = parsed && Object.prototype.hasOwnProperty.call(parsed, t) ? parsed[t] : null;
-        var detail = v === null ? "" : (Array.isArray(v) ? v.join(", ") : String(v));
+        var detail = v === null ? "" : describe(v);
         var row = li(t, "on", detail);
         row.className = "hit";
         row.addEventListener("click", function () { jumpTo(t); });

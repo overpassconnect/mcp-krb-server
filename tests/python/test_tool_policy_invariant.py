@@ -196,7 +196,7 @@ class PolicyHasNoPhantomTools(unittest.TestCase):
 
 class ForwardHeaderIsGatedTheSameWay(unittest.TestCase):
     """SECURITY.md [D1]. forward_header() selects the DOWNSTREAM SERVICE a tool may
-    reach as the caller, from delegation.TOOL_TARGETS keyed by tool name. It needs
+    reach as the caller, from authz.TOOL_TARGETS keyed by tool name. It needs
     exactly the discipline require() already has, and for a sharper reason.
 
     require() had a second line of defence: even if a tool passed the wrong name,
@@ -251,10 +251,10 @@ class ForwardHeaderIsGatedTheSameWay(unittest.TestCase):
         # for some future function to be given that name.
         import delegation
         forwarding = {fn.name for fn in TOOLS if _forward_calls(fn)}
-        for tool in delegation.TOOL_TARGETS:
+        for tool in authz.TOOL_TARGETS:
             with self.subTest(tool=tool):
                 self.assertIn(tool, forwarding,
-                              'delegation.TOOL_TARGETS grants %r a downstream target, '
+                              'authz.TOOL_TARGETS grants %r a downstream target, '
                               'but no tool by that name calls forward_header' % tool)
 
 

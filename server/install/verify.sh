@@ -681,11 +681,28 @@ head2 "14. on-behalf-of forwarding (SECURITY.md [D1])"
 _unit=/etc/systemd/system/mcp-server.service
 _deleg_on=0
 grep -q '^Environment=MCP_DELEGATION=1' "$_unit" 2>/dev/null && _deleg_on=1
-_tgts="$(sed -n 's/^Environment=MCP_DELEGATION_TARGETS=//p' "$_unit" 2>/dev/null)"
+# Targets live in the policy document now, beside the groups, so read them
+# from there rather than from the unit. Reading the unit would report "none"
+# forever on a migrated host, and quietly vouch for a feature nobody checked.
+_tgts="$(MCPPOL="$POLICY_FILE" python3 - <<'POLICYJSON' 2>/dev/null
+import json, os
+try:
+    with open(os.environ['MCPPOL'], 'r', encoding='utf-8') as fh:
+        doc = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+if isinstance(doc, dict):
+    rows = ['%s=%s' % (t, v['forwards_to'])
+            for t, v in sorted(doc.items())
+            if isinstance(v, dict) and v.get('forwards_to')]
+    if rows:
+        print(','.join(rows))
+POLICYJSON
+)"
 
 if [ "$_deleg_on" = 0 ]; then
     pass "forwarding is OFF (acceptor is receive-only; the keytab cannot authenticate outbound)"
-    [ -n "$_tgts" ] && fail "but MCP_DELEGATION_TARGETS='$_tgts' is set in the unit, which reads as
+    [ -n "$_tgts" ] && fail "but the policy grants targets ('$_tgts'), which reads as
        configured while nothing actually forwards"
 else
     info "forwarding is ON: this keytab can authenticate OUTBOUND, which narrows [C2]"
@@ -693,7 +710,7 @@ else
     if [ -z "$_tgts" ]; then
         # Not a failure: half-enabled is a legitimate state, and a PASS here
         # would vouch for a feature that refuses every call it is asked to make.
-        info "no MCP_DELEGATION_TARGETS set: every forward fails closed (no-target-policy)"
+        info "no forwards_to in the policy: every forward fails closed (no-target-policy)"
     else
         pass "targets: $_tgts"
         # Each target must be a principal the KDC actually knows, or the first real

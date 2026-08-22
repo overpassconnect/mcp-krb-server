@@ -943,11 +943,8 @@ case "${MCP_DELEGATION:-}" in
         ;;
     ''|0|false|FALSE|no|NO|off|OFF)
         # Shipped state: the line stays commented and the acceptor stays
-        # receive-only. Targets without the switch would look enabled in site.env
-        # while forwarding silently never happened, so refuse rather than ignore.
-        [ -n "${MCP_DELEGATION_TARGETS:-}" ] && die "MCP_DELEGATION_TARGETS names a downstream target but MCP_DELEGATION is off.
-  That combination reads as 'forwarding is configured' while nothing forwards.
-  Set MCP_DELEGATION=1 in $SITE_ENV, or clear MCP_DELEGATION_TARGETS."
+        # receive-only. A stale MCP_DELEGATION_TARGETS is caught below, whatever
+        # this is set to, with a message that says where the targets went.
         : ;;
     *)
         die "MCP_DELEGATION='$MCP_DELEGATION' is not a recognised boolean.
@@ -956,122 +953,27 @@ case "${MCP_DELEGATION:-}" in
   wrong identity. Use 1 or empty." ;;
 esac
 
-# Render MCP_DELEGATION_TARGETS, and validate it here rather than trusting the
-# server to reject it at import. A bad value caught at install time is a message
-# on this terminal; caught at import it is a service that will not start, found
-# later by whoever is on call. Same grammar as delegation._targets_from_env().
+# MCP_DELEGATION_TARGETS is no longer a site.env key. The forwarding target for a
+# tool now lives in the policy document beside its groups, where the admin editor
+# can show it and a change does not need a reinstall to take effect.
+#
+# Refuse rather than ignore. A key left here would read as "forwarding is
+# configured" while the server never sees it, which is the exact confusion this
+# move exists to end: the value sat in site.env, unread, and the tool failed
+# closed with nothing to say why.
 if [ -n "${MCP_DELEGATION_TARGETS:-}" ]; then
-    # Read FORWARDING_TOOLS out of the site tools file, once, before the loop.
-    # ast rather than import: importing would need the MCP SDK and would execute
-    # the file, and this runs before the unit is installed. Tolerates a bare
-    # {...} literal as well as frozenset({...}) and set({...}), because
-    # literal_eval sees the latter two as a Call and refuses them, and dictating
-    # one style to every deployment to suit the parser is the wrong way round.
-    _declared_fwd=''
-    if [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ]; then
-        _declared_fwd="$(/usr/bin/python3 - "$MCP_SITE_TOOLS" <<'PY' 2>/dev/null || true
-import ast, io, sys
-try:
-    tree = ast.parse(io.open(sys.argv[1], encoding='utf-8').read())
-except Exception:
-    raise SystemExit(0)
-for node in ast.walk(tree):
-    if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == 'FORWARDING_TOOLS'
-            for t in node.targets):
-        v = node.value
-        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
-                and v.func.id in ('frozenset', 'set') and len(v.args) == 1):
-            v = v.args[0]
-        try:
-            for name in sorted(ast.literal_eval(v)):
-                print(name)
-        except Exception:
-            pass
-        break
-PY
-)"
-    fi
+    die "MCP_DELEGATION_TARGETS is set in $SITE_ENV and is no longer read.
 
-    # Split on commas without a pipe: `die` inside a `while` fed by a pipeline
-    # runs in a subshell, so it would kill only the subshell and the install
-    # would carry on past a target it had just rejected.
-    _rest="$MCP_DELEGATION_TARGETS"
-    _seen=' '
-    while [ -n "$_rest" ]; do
-        case "$_rest" in
-            *,*) _ent="${_rest%%,*}"; _rest="${_rest#*,}" ;;
-            *)   _ent="$_rest";       _rest= ;;
-        esac
-        _ent="$(printf '%s' "$_ent" | tr -d '[:space:]')"
-        [ -n "$_ent" ] || continue
-        printf '%s' "$_ent" \
-            | grep -Eq '^[a-z][a-z0-9_]{0,63}=[A-Za-z0-9_-]{1,32}@[a-z0-9.-]{3,253}$' \
-            || die "MCP_DELEGATION_TARGETS entry '$_ent' is malformed.
-  Want tool=service@fqdn, e.g. trigger_build=HTTP@ci.example.internal.
-  FQDNs only: a short name could be widened by whatever the resolver decides.
-  One target per tool, and a comma separates ENTRIES, never two targets."
-        _tool="${_ent%%=*}"
-        # Two rows for one tool has no safe answer: target_for() refuses an
-        # ambiguous tool at runtime, so every call would fail closed while
-        # site.env looked configured.
-        case "$_seen" in
-            *" $_tool "*) die "MCP_DELEGATION_TARGETS lists '$_tool' more than once.
-  A tool gets exactly one downstream target. Two would mean something chooses at
-  runtime, and the only inputs available then come from the caller." ;;
-        esac
-        _seen="$_seen$_tool "
-        # A target for a tool that cannot forward is a live grant sitting unused,
-        # waiting for some future function to be given that name. Refuse it while
-        # it is still a typo rather than an inheritance.
-        # Look in the site tools file too. A deployment's own forwarding tools
-        # live there rather than in mcp_server.py, and checking only the shipped
-        # file would refuse every real target a site ever adds.
-        # Two ways a tool can be shown to forward, and both are exact.
-        #
-        # 1. The literal forward_header(ctx, 'tool') appears. That is how the tools
-        #    shipped in mcp_server.py are written, and it proves a call site.
-        #
-        # 2. The site tools file DECLARES it in FORWARDING_TOOLS.
-        #
-        # The declaration exists because inference does not work here. Matching only
-        # the literal refuses every tool in a file that shares helpers, which is how
-        # any file with more than a couple of forwarding tools is written, since a
-        # fresh Negotiate header is needed per request:
-        #
-        #     def _get(ctx, tool, path): ... forward_header(ctx, tool) ...
-        #     _get(ctx, 'list_docs', ...)
-        #
-        # and the looser rule that briefly replaced it, "the name appears somewhere
-        # in a file that forwards", accepts any registered tool at all, because
-        # every tool's name appears in its own register_tool_policy() call. That let
-        # a grant survive for a tool that never forwards: inert immediately, but a
-        # later tool taking that name would silently inherit an unreviewed target.
-        # Refuse it while it is still a typo rather than an inheritance.
-        _found=0
-        if grep -q "forward_header(ctx, '$_tool')" "$CODEDIR/mcp_server.py"; then
-            _found=1
-        elif [ -n "${MCP_SITE_TOOLS:-}" ] && [ -f "$MCP_SITE_TOOLS" ]; then
-            grep -q "forward_header(ctx, '$_tool')" "$MCP_SITE_TOOLS" && _found=1
-            if [ "$_found" = 0 ] && printf '%s' "$_declared_fwd" \
-                 | grep -qx "$_tool"; then _found=1; fi
-        fi
-        [ "$_found" = 1 ] \
-            || die "MCP_DELEGATION_TARGETS grants '$_tool' a downstream target, but
-  nothing shows that tool forwards. It is not in a forward_header(ctx, '$_tool')
-  call in mcp_server.py${MCP_SITE_TOOLS:+ or $MCP_SITE_TOOLS}, and it is not listed in that
-  file's FORWARDING_TOOLS. Either the name is a typo, or the grant is dead config,
-  or the tool forwards and was not declared. Refusing to install an unused grant."
-    done
-    # '|' as the sed delimiter, not '#': the pattern starts with a literal '#'
-    # (the commented line being filled in), which would close the expression.
-    sed -i "s|^# *Environment=MCP_DELEGATION_TARGETS=.*|Environment=MCP_DELEGATION_TARGETS=$MCP_DELEGATION_TARGETS|" \
-        "$RENDER/mcp-server.service"
-    grep -q '^Environment=MCP_DELEGATION_TARGETS=' "$RENDER/mcp-server.service" \
-        || die "MCP_DELEGATION_TARGETS is set but the unit template has no
-  '# Environment=MCP_DELEGATION_TARGETS=' line to fill in. Refusing to install a
-  unit whose forwarding tools would all fail closed while site.env says they work."
-    say "delegation targets: $MCP_DELEGATION_TARGETS"
+  Forwarding targets moved into the policy document, next to the groups, so both
+  halves of a tool's authorization have one home. Migrate once, then remove the
+  key from $SITE_ENV:
+
+    sudo $(dirname "$0")/migrate-policy.py \
+         \"\${MCP_POLICY_FILE:-/var/lib/mcp-server/tool-groups.json}\" \
+         --targets '$MCP_DELEGATION_TARGETS'
+
+  The server does not accept the old shape on purpose: a reader that took both
+  would let a file sit half-migrated and still load."
 fi
 
 # A deployment's own tools. The file is not carried by this repository and not

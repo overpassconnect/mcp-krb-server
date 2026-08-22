@@ -53,63 +53,32 @@ Prerequisites (all outside this file, all verified against a live KDC):
 import os
 import re
 
-# tool name -> frozenset of allowed downstream SPNs, hostbased form 'svc@fqdn'.
-# Deny by default: a tool absent from this map may not forward, and an empty map
-# means the feature does nothing at all. Never populate this from a request, a
-# tool argument, or config a tool author controls: a caller-chosen target is
-# server-side request forgery carrying the caller's own identity.
+# Where the targets come from: authz.TOOL_TARGETS, which authz loads from the
+# same policy document as the groups.
 #
-# FQDNs only, never short names, so the target cannot be widened by a resolver.
-TOOL_TARGETS = {
-    # 'trigger_build': frozenset({'HTTP@ci.example.internal'}),
-}
+# They used to be parsed here from MCP_DELEGATION_TARGETS, a systemd Environment=
+# line baked in at install time. That had three costs. The value could only change
+# by reinstalling, so it was invisible to the admin editor that manages the other
+# half of the same policy. It lived in a different file with a different lifetime
+# from the groups, so a tool could be in one and not the other and nothing said
+# so, which is exactly how a tool shipped here once and refused to forward with
+# the row sitting in site.env unread. And "merged once at import" bought
+# immutability that never protected anything, because this process is the thing
+# enforcing the map: a compromised server ignores it rather than editing it.
+#
+# What has NOT changed is the rule the whole file exists for: the target is never
+# chosen by a caller, a tool argument, or a tool author. authz refuses to let
+# register_tool_policy() set one, so it still takes somebody with write access to
+# the policy, which is the editor's admins or root on the host.
+import authz
+
+
+def _targets():
+    return authz.TOOL_TARGETS
+
 
 _SPN_RE = re.compile(r'^[A-Za-z0-9_-]{1,32}@[a-z0-9.-]{3,253}$')
-_TOOL_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
 _MAX_TARGETS_PER_TOOL = 8
-_MAX_ENV_TARGETS = 16
-
-
-def _targets_from_env(raw):
-    """Parse the operator overlay: MCP_DELEGATION_TARGETS='tool=svc@fqdn,...'.
-
-    Why it exists. A real target is a real hostname, and this repo ships without
-    any, so the alternative is every deployment hand-editing a security-owned file
-    and carrying that diff forever. This keeps the site's targets in site.env,
-    next to MCP_DELEGATION itself, where the same operator already decides whether
-    forwarding happens at all.
-
-    Why it is not a hole. The threat this whole file exists to stop is a
-    caller-chosen target. This value comes from the systemd unit's EnvironmentFile,
-    which is root-owned; a caller cannot reach it, and neither can a tool author
-    editing tool code. It is the same trust level as MCP_DELEGATION.
-
-    It cannot override a literal row above. A reviewed target must not be silently
-    redirected by a deployment, so a collision is fatal rather than resolved by
-    precedence. Every parse failure raises at import, so a typo takes the service
-    down instead of leaving it running with a policy nobody read."""
-    out = {}
-    for item in [x.strip() for x in (raw or '').split(',') if x.strip()]:
-        tool, sep, spn = item.partition('=')
-        tool, spn = tool.strip(), spn.strip()
-        if not sep or not _TOOL_RE.match(tool):
-            raise ValueError('MCP_DELEGATION_TARGETS: bad entry %r, want tool=svc@fqdn' % item)
-        if not _SPN_RE.match(spn):
-            raise ValueError('MCP_DELEGATION_TARGETS: bad SPN %r for tool %r' % (spn, tool))
-        if tool in TOOL_TARGETS:
-            raise ValueError('MCP_DELEGATION_TARGETS: %r is already set in code and a '
-                             'deployment may not redirect a reviewed target' % tool)
-        if tool in out:
-            raise ValueError('MCP_DELEGATION_TARGETS: %r listed twice' % tool)
-        out[tool] = frozenset({spn})
-    if len(out) > _MAX_ENV_TARGETS:
-        raise ValueError('MCP_DELEGATION_TARGETS: too many entries (%d)' % len(out))
-    return out
-
-
-# Merged once, at import, so the policy cannot change under a running process and
-# a bad value is a startup failure rather than a per-request surprise.
-TOOL_TARGETS.update(_targets_from_env(os.environ.get('MCP_DELEGATION_TARGETS')))
 
 
 # MIT krb5 GSS_KRB5_GET_CRED_IMPERSONATOR (gssapi_krb5.h, MIT krb5 >= 1.16).
@@ -197,7 +166,7 @@ def target_for(tool):
     caller."""
     if not enabled():
         raise DelegationError('delegation-disabled')
-    allowed = TOOL_TARGETS.get(tool)
+    allowed = _targets().get(tool)
     if not allowed:
         raise DelegationError('no-target-policy')
     if len(allowed) > _MAX_TARGETS_PER_TOOL:

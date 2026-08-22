@@ -27,6 +27,7 @@ sys.modules['gssapi.raw.misc'] = _raw_misc
 
 REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 sys.path.insert(0, os.path.join(REPO, 'server'))
+import authz
 import delegation                                      # noqa: E402
 import spnego_auth                                     # noqa: E402
 
@@ -43,13 +44,13 @@ def hdr(principal):
 class Base(unittest.TestCase):
     def setUp(self):
         fake_gssapi.reset()
-        self._saved = dict(delegation.TOOL_TARGETS)
-        delegation.TOOL_TARGETS.clear()
+        self._saved = dict(authz.TOOL_TARGETS)
+        authz.TOOL_TARGETS.clear()
         os.environ.pop('MCP_DELEGATION', None)
 
     def tearDown(self):
-        delegation.TOOL_TARGETS.clear()
-        delegation.TOOL_TARGETS.update(self._saved)
+        authz.TOOL_TARGETS.clear()
+        authz.TOOL_TARGETS.update(self._saved)
         os.environ.pop('MCP_DELEGATION', None)
 
     def enable(self):
@@ -81,13 +82,13 @@ class OffByDefault(Base):
         self.assertFalse(delegation.enabled())
 
     def test_target_for_denies_when_disabled(self):
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         with self.assertRaises(delegation.DelegationError) as c:
             delegation.target_for('t')
         self.assertEqual(c.exception.reason, 'delegation-disabled')
 
     def test_negotiate_header_denies_when_disabled(self):
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         with self.assertRaises(delegation.DelegationError):
             delegation.negotiate_header(object(), 't', self.IMPERSONATOR)
 
@@ -109,14 +110,14 @@ class TargetPolicy(Base):
 
     def test_allowed_tool_returns_its_target(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         self.assertEqual(delegation.target_for('t'), TARGET)
 
     def test_ambiguous_target_denied(self):
         # Two targets would mean something has to CHOOSE at request time, and the
         # only inputs available then come from the caller.
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET, 'HTTP@other.example.internal'})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET, 'HTTP@other.example.internal'})
         with self.assertRaises(delegation.DelegationError) as c:
             delegation.target_for('t')
         self.assertEqual(c.exception.reason, 'ambiguous-target')
@@ -125,14 +126,14 @@ class TargetPolicy(Base):
         self.enable()
         for bad in ['no-at-sign', 'HTTP@', '@host', 'HTTP@UPPER.example.internal',
                     'HTTP@host with space', 'HTTP@host;rm']:
-            delegation.TOOL_TARGETS['t'] = frozenset({bad})
+            authz.TOOL_TARGETS['t'] = frozenset({bad})
             with self.assertRaises(delegation.DelegationError, msg=bad) as c:
                 delegation.target_for('t')
             self.assertEqual(c.exception.reason, 'invalid-target-spn', bad)
 
     def test_empty_target_set_denied(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset()
+        authz.TOOL_TARGETS['t'] = frozenset()
         with self.assertRaises(delegation.DelegationError) as c:
             delegation.target_for('t')
         self.assertEqual(c.exception.reason, 'no-target-policy')
@@ -179,7 +180,7 @@ class AcceptorEvidence(Base):
 class Forwarding(Base):
     def test_allowlisted_target_produces_negotiate_header(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)
         h = delegation.negotiate_header(self.evidence_for(), 't', self.IMPERSONATOR)
         self.assertTrue(h.startswith('Negotiate '))
@@ -191,7 +192,7 @@ class Forwarding(Base):
         # and the KDC one is meaningful again now that a forwarded TGT (the
         # credential it does NOT constrain) is refused outright.
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         # deliberately do NOT call allow_target
         with self.assertRaises(delegation.DelegationError) as c:
             delegation.negotiate_header(self.evidence_for(), 't', self.IMPERSONATOR)
@@ -199,7 +200,7 @@ class Forwarding(Base):
 
     def test_missing_evidence_never_falls_back_to_service_identity(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)
         with self.assertRaises(delegation.DelegationError) as c:
             delegation.negotiate_header(None, 't', self.IMPERSONATOR)
@@ -207,7 +208,7 @@ class Forwarding(Base):
 
     def test_audit_records_subject_and_target(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)
         seen = []
         delegation.negotiate_header(self.evidence_for(ALICE), 't', self.IMPERSONATOR,
@@ -220,7 +221,7 @@ class Forwarding(Base):
     def test_no_audit_event_on_refusal(self):
         # A refused forward must not leave an 'allow' record behind.
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         seen = []
         with self.assertRaises(delegation.DelegationError):
             delegation.negotiate_header(self.evidence_for(), 't', self.IMPERSONATOR,
@@ -232,74 +233,91 @@ class ShippedPolicyIsEmpty(unittest.TestCase):
     def test_no_targets_are_shipped(self):
         # Shipping a populated allowlist would enable forwarding for anyone who
         # merely sets MCP_DELEGATION, turning a deployment decision into a typo.
+        #
+        # The map moved to authz, which owns the policy document it now comes
+        # from, so this reloads authz rather than delegation.
         import importlib
-        mod = importlib.reload(delegation)
+        mod = importlib.reload(authz)
+        self.assertEqual(mod._DEFAULT_TOOL_TARGETS, {})
         self.assertEqual(mod.TOOL_TARGETS, {})
 
 
 
 
-class OperatorTargetOverlay(Base):
-    """delegation._targets_from_env. This parses MCP_DELEGATION_TARGETS, which is
-    now what actually decides where a caller's credential may be sent, so every
-    rejection below is load-bearing rather than tidiness."""
+class TargetsFromPolicy(Base):
+    """authz.targets_from_json. This decides where a caller's credential may be
+    sent, so every rejection below is load-bearing rather than tidiness.
 
-    def parse(self, raw):
-        return delegation._targets_from_env(raw)
+    It replaced delegation._targets_from_env, which parsed the same information
+    out of MCP_DELEGATION_TARGETS. The targets now live in the policy document
+    beside the groups, so both halves of a tool's authorization have one home,
+    one lifetime and one reader. Two of the old tests do not survive the move and
+    should not be re-added: duplicate keys and an entry cap were properties of a
+    comma-separated string, and JSON has neither problem."""
+
+    def parse(self, doc):
+        return authz.targets_from_json(doc, known_tools={'a', 'b', 'trigger_build',
+                                                         'reviewed'})
 
     def test_empty_and_absent_yield_nothing(self):
-        for raw in (None, '', '   ', ',,'):
-            self.assertEqual({}, self.parse(raw))
+        self.assertEqual({}, self.parse({}))
+        self.assertEqual({}, self.parse({'a': {'groups': ['g']}}))
+        self.assertEqual({}, self.parse({'a': {'groups': ['g'], 'forwards_to': None}}))
 
     def test_a_well_formed_entry_parses(self):
-        self.assertEqual({'trigger_build': frozenset({'HTTP@ci.example.internal'})},
-                         self.parse('trigger_build=HTTP@ci.example.internal'))
+        self.assertEqual(
+            {'trigger_build': frozenset({'HTTP@ci.example.internal'})},
+            self.parse({'trigger_build': {'groups': ['g'],
+                                          'forwards_to': 'HTTP@ci.example.internal'}}))
 
-    def test_several_entries_and_surrounding_space(self):
-        got = self.parse(' a=HTTP@one.example.internal , b=ldap@two.example.internal ')
+    def test_several_entries(self):
+        got = self.parse({'a': {'groups': ['g'], 'forwards_to': 'HTTP@one.example.internal'},
+                          'b': {'groups': ['g'], 'forwards_to': 'ldap@two.example.internal'}})
         self.assertEqual({'a': frozenset({'HTTP@one.example.internal'}),
                           'b': frozenset({'ldap@two.example.internal'})}, got)
 
-    def test_malformed_entries_raise(self):
-        for raw in ('trigger_build',                      # no '='
-                    '=HTTP@ci.example.internal',          # no tool
-                    'trigger_build=',                     # no SPN
-                    'trigger_build=notanspn',             # no '@'
-                    'trigger_build=HTTP@',                # no host
-                    'Trigger=HTTP@ci.example.internal',   # tool charset
-                    'a b=HTTP@ci.example.internal',       # space in tool
-                    'a=HTTP@ci example.internal',         # space in host
-                    'a=HTTP@ci.example.internal;x'):      # shell metachar
-            with self.subTest(raw=raw):
-                self.assertRaises(ValueError, self.parse, raw)
+    def test_malformed_targets_raise(self):
+        for spn in ('notanspn',                    # no '@'
+                    'HTTP@',                       # no host
+                    '@ci.example.internal',        # no service
+                    'HTTP@ci example.internal',    # space in host
+                    'HTTP@ci.example.internal;x',  # shell metachar
+                    'HTTP@CI.EXAMPLE.INTERNAL',    # host charset is lowercase
+                    '', 5, [], {}):
+            with self.subTest(spn=spn):
+                self.assertRaises(ValueError, self.parse,
+                                  {'a': {'groups': ['g'], 'forwards_to': spn}})
 
-    def test_a_deployment_cannot_redirect_a_reviewed_target(self):
-        # The whole point of keeping literals in code is that they were reviewed.
-        # Precedence would let site.env quietly point one somewhere else.
-        delegation.TOOL_TARGETS['reviewed'] = frozenset({'HTTP@ci.example.internal'})
-        try:
-            self.assertRaises(ValueError, self.parse, 'reviewed=HTTP@evil.example.internal')
-        finally:
-            del delegation.TOOL_TARGETS['reviewed']
-
-    def test_duplicate_tool_raises_rather_than_last_wins(self):
+    def test_an_unknown_tool_is_refused(self):
         self.assertRaises(ValueError, self.parse,
-                          'a=HTTP@one.example.internal,a=HTTP@two.example.internal')
+                          {'nope': {'groups': ['g'],
+                                    'forwards_to': 'HTTP@ci.example.internal'}})
 
-    def test_too_many_entries_raise(self):
-        raw = ','.join('t%d=HTTP@h%d.example.internal' % (i, i)
-                       for i in range(delegation._MAX_ENV_TARGETS + 1))
-        self.assertRaises(ValueError, self.parse, raw)
+    def test_an_unknown_key_is_refused(self):
+        # Silently ignoring a key is how a typo becomes a tool with no target.
+        self.assertRaises(ValueError, authz.policy_from_json,
+                          {'whoami': {'groups': authz.ANY_TOKEN, 'forwards': 'x'}})
+
+    def test_a_document_cannot_redirect_a_reviewed_target(self):
+        # The point of keeping literals in code is that they were reviewed.
+        # Precedence would let a document quietly point one somewhere else.
+        authz._DEFAULT_TOOL_TARGETS['reviewed'] = frozenset({'HTTP@ci.example.internal'})
+        try:
+            self.assertRaises(ValueError, self.parse,
+                              {'reviewed': {'groups': ['g'],
+                                            'forwards_to': 'HTTP@evil.example.internal'}})
+        finally:
+            del authz._DEFAULT_TOOL_TARGETS['reviewed']
 
     def test_one_tool_gets_exactly_one_target(self):
-        # target_for() refuses an ambiguous row, so the overlay must never build
-        # one; a comma is an entry separator, never a second target.
-        got = self.parse('a=HTTP@one.example.internal')
+        # target_for() refuses an ambiguous row, so the document must never build
+        # one. A single string is the only shape accepted.
+        got = self.parse({'a': {'groups': ['g'], 'forwards_to': 'HTTP@one.example.internal'}})
         self.assertEqual(1, len(got['a']))
 
-    def test_shipped_policy_is_empty(self):
-        # Guards the merge at import time: with no env set, the repo grants nothing.
-        self.assertEqual({}, self.parse(os.environ.get('MCP_DELEGATION_TARGETS')))
+    def test_shipped_policy_grants_nothing(self):
+        # With no document loaded, the repo forwards nowhere.
+        self.assertEqual({}, authz._DEFAULT_TOOL_TARGETS)
 
 
 class ForwardedTgtIsRefused(Base):
@@ -316,7 +334,7 @@ class ForwardedTgtIsRefused(Base):
 
     def test_a_delegating_caller_is_refused(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)          # the KDC would happily comply
         ev = self.evidence_for(delegating=True)
         with self.assertRaises(delegation.DelegationError) as c:
@@ -327,14 +345,14 @@ class ForwardedTgtIsRefused(Base):
         # Guards against "fix" by refusing everything, which would pass the test
         # above while silently disabling the feature.
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)
         h = delegation.negotiate_header(self.evidence_for(), 't', self.IMPERSONATOR)
         self.assertTrue(h.startswith('Negotiate '))
 
     def test_refusal_leaves_no_allow_audit_record(self):
         self.enable()
-        delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+        authz.TOOL_TARGETS['t'] = frozenset({TARGET})
         fake_gssapi.allow_target(TARGET)
         seen = []
         with self.assertRaises(delegation.DelegationError):
@@ -539,7 +557,7 @@ class SpnegoFraming(unittest.TestCase):
         d.setUp()
         try:
             d.enable()
-            delegation.TOOL_TARGETS['t'] = frozenset({TARGET})
+            authz.TOOL_TARGETS['t'] = frozenset({TARGET})
             fake_gssapi.allow_target(TARGET)
             h = delegation.negotiate_header(d.evidence_for(), 't', d.IMPERSONATOR)
             tok = base64.b64decode(h.split(' ', 1)[1], validate=True)

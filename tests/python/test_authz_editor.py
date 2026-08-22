@@ -147,7 +147,7 @@ class EditorApp(unittest.TestCase):
         self.assertIn('text/html', h['content-type'])
         self.assertIn('nonce-', h['content-security-policy'])
         self.assertIn("default-src 'none'", h['content-security-policy'])
-        self.assertIn(b'Per-tool IPA-group policy', body)
+        self.assertIn(b'Per-tool authorization', body)
         self.assertIn(ALICE.encode(), body)                 # principal shown, escaped
 
     def test_admin_gets_policy_json_with_etag(self):
@@ -155,7 +155,7 @@ class EditorApp(unittest.TestCase):
         self.assertEqual(s, 200)
         self.assertEqual(h.get('etag'), authz.policy_etag())
         d = json.loads(body)
-        self.assertEqual(d['policy']['whoami'], authz.ANY_TOKEN)
+        self.assertEqual(d['policy']['whoami'], {'groups': authz.ANY_TOKEN})
         self.assertIn('restart_service', d['tools'])
 
     def test_the_api_reports_the_registered_tools(self):
@@ -168,7 +168,7 @@ class EditorApp(unittest.TestCase):
 
     # --- happy-path write --------------------------------------------------
     def test_valid_put_updates_policy_and_persists(self):
-        s, h, body = self._put({'list_projects': ['mcp-users', 'mcp-leads']})
+        s, h, body = self._put({'list_projects': {'groups': ['mcp-users', 'mcp-leads']}})
         self.assertEqual(s, 200, body)
         self.assertEqual(sorted(authz.TOOL_GROUPS['list_projects']), ['mcp-leads', 'mcp-users'])
         self.assertTrue(os.path.exists(self.policy_file))
@@ -176,7 +176,7 @@ class EditorApp(unittest.TestCase):
         self.assertTrue(any(e.get('event') == 'policy.change' for e in self.audits))
 
     def test_put_any_token_opens_tool(self):
-        s, _, _ = self._put({'restart_service': authz.ANY_TOKEN})
+        s, _, _ = self._put({'restart_service': {'groups': authz.ANY_TOKEN}})
         self.assertEqual(s, 200)
         allowed, detail = authz.authorize_tool(BOB, 'restart_service')
         self.assertTrue(allowed)
@@ -242,14 +242,14 @@ class EditorApp(unittest.TestCase):
 
     def test_put_bad_group_name_rejected(self):
         before = authz.policy_to_json()
-        s, _, _ = self._put({'list_projects': ['bad group!']})
+        s, _, _ = self._put({'list_projects': {'groups': ['bad group!']}})
         self.assertEqual(s, 400)
         self.assertEqual(authz.policy_to_json(), before)
 
     def test_editor_gate_independent_of_policy(self):
         # A successful policy edit cannot change who is a policy-admin: the
         # allowlist lives in the app, never in the editable TOOL_GROUPS.
-        s, _, _ = self._put({'restart_service': authz.ANY_TOKEN})
+        s, _, _ = self._put({'restart_service': {'groups': authz.ANY_TOKEN}})
         self.assertEqual(s, 200)
         self.assertEqual(self.app.admins, frozenset({ALICE}))
         s, _, _ = run(_call(self.app, 'GET', authz_editor.PATH_HTML, principal=BOB))
@@ -300,23 +300,40 @@ class PolicyPersistence(unittest.TestCase):
 
     def test_to_from_json_roundtrip(self):
         j = authz.policy_to_json()
-        self.assertEqual(j['whoami'], authz.ANY_TOKEN)
+        self.assertEqual(j['whoami'], {'groups': authz.ANY_TOKEN})
         back = authz.policy_from_json(j)
         self.assertIs(back['whoami'], authz.ANY_AUTHENTICATED)
         self.assertEqual(set(back['restart_service']), {'mcp-operators'})
 
+    def test_a_bare_group_list_is_refused_as_the_old_format(self):
+        # No fallback on purpose. Accepting both shapes would mean a file could
+        # be half-migrated and still load, which is how the two halves of a
+        # policy drift apart again.
+        with self.assertRaises(ValueError) as e:
+            authz.policy_from_json({'whoami': authz.ANY_TOKEN})
+        self.assertIn('migrate-policy.py', str(e.exception))
+
+    def test_forwards_to_round_trips(self):
+        j = {'list_projects': {'groups': ['mcp-users'],
+                               'forwards_to': 'HTTP@ci.example.internal'}}
+        self.assertEqual({'list_projects': frozenset({'HTTP@ci.example.internal'})},
+                         authz.targets_from_json(j, known_tools=KNOWN))
+
     def test_from_json_rejects_unknown_tool(self):
         with self.assertRaises(ValueError):
-            authz.policy_from_json({'nope': ['mcp-users']})
+            authz.policy_from_json({'nope': {'groups': ['mcp-users']}})
 
     def test_from_json_rejects_bad_shapes(self):
-        for bad in ([], {'list_projects': []}, {'list_projects': 'mcp-users'},
-                     {'list_projects': ['ok', 5]}, {'list_projects': ['bad!name']}):
+        for bad in ([], {'list_projects': {'groups': []}},
+                     {'list_projects': {'groups': 'mcp-users'}},
+                     {'list_projects': {'groups': ['ok', 5]}},
+                     {'list_projects': {'groups': ['bad!name']}},
+                     {'list_projects': ['mcp-users']}):        # the old bare-list shape
             with self.assertRaises(ValueError):
                 authz.policy_from_json(bad)
 
     def test_write_policy_persists_and_merges_over_defaults(self):
-        etag = authz.write_policy(self.path, {'list_projects': ['mcp-users', 'mcp-leads']}, known_tools=KNOWN)
+        etag = authz.write_policy(self.path, {'list_projects': {'groups': ['mcp-users', 'mcp-leads']}}, known_tools=KNOWN)
         self.assertTrue(os.path.exists(self.path))
         self.assertEqual(etag, authz.policy_etag())
         self.assertEqual(set(authz.TOOL_GROUPS['list_projects']), {'mcp-users', 'mcp-leads'})
@@ -325,7 +342,7 @@ class PolicyPersistence(unittest.TestCase):
     def test_write_policy_invalid_does_not_touch_disk_or_live(self):
         before = authz.policy_to_json()
         with self.assertRaises(ValueError):
-            authz.write_policy(self.path, {'unknown_tool': ['g']}, known_tools=KNOWN)
+            authz.write_policy(self.path, {'unknown_tool': {'groups': ['g']}}, known_tools=KNOWN)
         self.assertFalse(os.path.exists(self.path))
         self.assertEqual(authz.policy_to_json(), before)
 
@@ -335,7 +352,7 @@ class PolicyPersistence(unittest.TestCase):
         self.assertEqual(authz.policy_to_json(), authz.policy_to_json(authz._DEFAULT_TOOL_GROUPS))
 
     def test_load_corrupt_file_fails_closed(self):
-        authz.write_policy(self.path, {'list_projects': ['mcp-users']}, known_tools=KNOWN)
+        authz.write_policy(self.path, {'list_projects': {'groups': ['mcp-users']}}, known_tools=KNOWN)
         good = authz.policy_to_json()
         with open(self.path, 'w', encoding='utf-8') as f:
             f.write('{ this is not json')
@@ -345,13 +362,13 @@ class PolicyPersistence(unittest.TestCase):
         self.assertEqual(authz.policy_to_json(), good)       # kept last-good, not opened
 
     def test_reset_reverts_to_default(self):
-        authz.write_policy(self.path, {'restart_service': authz.ANY_TOKEN}, known_tools=KNOWN)
+        authz.write_policy(self.path, {'restart_service': {'groups': authz.ANY_TOKEN}}, known_tools=KNOWN)
         authz.reset_policy()
         self.assertEqual(set(authz.TOOL_GROUPS['restart_service']), {'mcp-operators'})
 
     def test_etag_changes_with_policy(self):
         e0 = authz.policy_etag()
-        authz.write_policy(self.path, {'list_projects': ['mcp-users', 'x-team']}, known_tools=KNOWN)
+        authz.write_policy(self.path, {'list_projects': {'groups': ['mcp-users', 'x-team']}}, known_tools=KNOWN)
         self.assertNotEqual(e0, authz.policy_etag())
 
 
