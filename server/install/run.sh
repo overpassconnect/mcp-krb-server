@@ -27,8 +27,8 @@ CLIENT_SITE_SECTIONS=""; CLIENT_DOWNLOAD_BASE=""; CLIENT_CA_INSTALL=""; CLIENT_P
 CLIENT_ORG_NAME=""; CLIENT_SUPPORT_EMAIL=""; CLIENT_DNS_IP=""
 ACME_DIRECTORY=""; ACME_EMAIL=""; ACME_RSA_KEY_SIZE=""
 CERT_MODE="acme"; CERT_PATH=""; WHEELHOUSE=""
-ROTATE_KEYTAB=0; CREATE_IPA_SERVICE=0; DRY_RUN=0; FORCE_UNIT=0; ENABLE_AUTHZ_EDITOR=0
-DISABLE_AUTHZ_EDITOR=0
+ROTATE_KEYTAB=0; CREATE_IPA_SERVICE=0; DRY_RUN=0; FORCE_UNIT=0
+AUTHZ_EDITOR_ON=0
 
 usage() {
     cat <<'USAGE'
@@ -91,15 +91,6 @@ usage: run.sh [options]
   --rotate-keytab        re-retrieve the keytab (BUMPS THE KVNO, breaks live tickets)
   --create-ipa-service   run `ipa service-add` if the SPN is missing (needs an admin ticket)
   --force-unit           overwrite a locally edited unit instead of aborting
-  --enable-authz-editor  serve the web policy editor. A FLAG, never a site.env
-                         key: it is an authenticated write surface over tool
-                         authorization, so whoever runs the installer must ask
-                         for it, and automation driven from a config file cannot
-                         turn it on. Requires MCP_POLICY_ADMINS in site.env.
-  --disable-authz-editor turn the editor off on a host where it is currently on.
-                         Needed because a plain re-run refuses to disable it
-                         silently; turning a live feature off is as deliberate a
-                         decision as turning it on.
   --dry-run              print what would change, mutate nothing
   -h, --help             this text
 
@@ -148,8 +139,6 @@ while [ $# -gt 0 ]; do
         --rotate-keytab)    ROTATE_KEYTAB=1 ;;
         --create-ipa-service) CREATE_IPA_SERVICE=1 ;;
         --force-unit)       FORCE_UNIT=1 ;;
-        --enable-authz-editor) ENABLE_AUTHZ_EDITOR=1 ;;
-        --disable-authz-editor) DISABLE_AUTHZ_EDITOR=1 ;;
         --dry-run)          DRY_RUN=1 ;;
         -h|--help)          usage; exit 0 ;;
         *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -1131,57 +1120,40 @@ if [ -n "${MCP_SITE_TOOLS:-}" ]; then
 fi
 
 # --- policy editor ----------------------------------------------------------
-# The switch is --enable-authz-editor and deliberately NOT a site.env key. The
-# editor is an authenticated write surface over tool authorization: whoever can
-# reach it can widen who may call what. Keeping the switch in the invocation
-# means a human asked for it, while automation that only supplies a parameter
-# file cannot turn it on. That is the same rule the old assertion enforced by
-# forbidding the line outright; the difference is that the state is now
-# reachable from source instead of only by hand-editing the unit afterwards,
-# which is how the live host ended up unreproducible.
+# MCP_AUTHZ_EDITOR is an ordinary site.env key, like every other value here.
 #
-# The three values below are inert without the switch, so they are ordinary
-# site.env keys.
+# It was a flag once, --enable-authz-editor, on the reasoning that a parameter
+# file must not be able to switch on an authenticated write surface over tool
+# authorization. That reasoning does not survive contact with this host:
+# site.env is 0640 root:root and nothing writes it automatically, so setting the
+# key and passing the flag need exactly the same privilege, root here. The flag
+# gated nothing the file did not already gate.
+#
+# What it cost was real. Living only in the invocation, the state was recorded
+# nowhere, so a host rebuilt from site.env came up WITHOUT the editor and
+# nothing said so. And a plain re-run, which is how every other setting
+# converges, silently turned it off: that happened, the only symptom was a 404
+# on a page nobody was watching, and meanwhile the server had fallen back to the
+# in-code default policy, which is a silent authorization change. Two guards
+# were then added to paper over it, so the switch cost three mechanisms to
+# explain instead of one line in a file.
+#
+# As a key, a re-run reads the same file and converges. Neither guard is needed,
+# and the state lives somewhere it can be reviewed, diffed and reproduced.
 MCP_POLICY_ADMINS="${MCP_POLICY_ADMINS:-}"
 MCP_POLICY_FILE="${MCP_POLICY_FILE:-/var/lib/mcp-server/tool-groups.json}"
 MCP_PUBLIC_ORIGIN="${MCP_PUBLIC_ORIGIN:-https://$FQDN}"
 
-case "${MCP_AUTHZ_EDITOR:-}" in
-    ''|0|false|FALSE|no|NO|off|OFF) : ;;
-    *) die "MCP_AUTHZ_EDITOR is set in $SITE_ENV, and it is not settable there.
-  The policy editor is an authenticated write surface over tool authorization, so
-  enabling it is a decision the person running the installer makes, not one a
-  parameter file makes on their behalf. Remove it from site.env and pass
-  --enable-authz-editor instead." ;;
+case "$(printf '%s' "${MCP_AUTHZ_EDITOR:-}" | tr '[:upper:]' '[:lower:]')" in
+    ''|0|false|no|off) AUTHZ_EDITOR_ON=0 ;;
+    1|true|yes|on)     AUTHZ_EDITOR_ON=1 ;;
+    *) die "MCP_AUTHZ_EDITOR in $SITE_ENV is '$MCP_AUTHZ_EDITOR', which is neither
+  on nor off. Want yes or no. Refusing to guess a direction for an authorization
+  surface." ;;
 esac
 
-# Refuse to turn the editor OFF by omission. The flag being a flag is what keeps
-# a config file from switching it on; the cost is that a plain re-run, which is
-# how every other setting converges, silently switched it off. That happened: a
-# routine re-run to deploy a code fix took the editor down, and the only symptom
-# was a 404 on a page nobody was looking at. The policy file was untouched but
-# unread, so the in-code defaults were live instead of the site's, which is a
-# silent authorization change.
-#
-# So disabling is now as deliberate as enabling. Nothing is inferred from
-# site.env here, which would re-open the hole the case above closes: the check
-# reads the INSTALLED UNIT, i.e. the state this host is actually in.
-if [ "$ENABLE_AUTHZ_EDITOR" != 1 ] && [ "$DISABLE_AUTHZ_EDITOR" != 1 ] \
-   && [ -f "$UNIT" ] && grep -q '^Environment=MCP_AUTHZ_EDITOR=1' "$UNIT"; then
-    die "the policy editor is ON on this host, and this run would turn it off.
-
-  Nothing on the command line asked for that, and it is not a safe default: with
-  the editor off the server stops reading $MCP_POLICY_FILE, so the reviewed
-  in-code defaults become the live policy. Every tool whose access the editor was
-  managing silently changes hands.
-
-  Pick one, explicitly:
-    --enable-authz-editor    keep it on   (the usual answer when re-running)
-    --disable-authz-editor   turn it off  (say so and it will)"
-fi
-
-if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
-    [ -n "$MCP_POLICY_ADMINS" ] || die "--enable-authz-editor needs MCP_POLICY_ADMINS in $SITE_ENV.
+if [ "$AUTHZ_EDITOR_ON" = 1 ]; then
+    [ -n "$MCP_POLICY_ADMINS" ] || die "MCP_AUTHZ_EDITOR is on, so $SITE_ENV needs MCP_POLICY_ADMINS.
   An editor with no admins is a page that authenticates everyone and authorises
   nobody, and the only way to find that out is to open it."
     # Full principals only. A bare username would silently never match, so the
@@ -1223,12 +1195,12 @@ if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
 
     for _k in MCP_AUTHZ_EDITOR MCP_POLICY_ADMINS MCP_POLICY_FILE MCP_PUBLIC_ORIGIN; do
         grep -q "^Environment=$_k=" "$RENDER/mcp-server.service" \
-            || die "--enable-authz-editor was given but the unit template has no
+            || die "MCP_AUTHZ_EDITOR is on but the unit template has no
   '# Environment=$_k=' line to fill in. Refusing to install a unit that would run
-  without the editor while the operator asked for it."
+  without the editor while site.env asks for it."
     done
     grep -qx 'StateDirectory=mcp-server' "$RENDER/mcp-server.service" \
-        || die "--enable-authz-editor was given but the unit template has no
+        || die "MCP_AUTHZ_EDITOR is on but the unit template has no
   '# StateDirectory=mcp-server' line to uncomment; the editor could not save."
 
     warn "POLICY EDITOR IS ON at $MCP_PUBLIC_ORIGIN/admin/authz.
@@ -1258,16 +1230,15 @@ grep -qx "Environment=KRB5_KTNAME=$KEYTAB" "$RENDER/mcp-server.service" \
     || die "rendered unit has no 'Environment=KRB5_KTNAME=$KEYTAB'.
   Without it gssapi looks in the system default keytab and every handshake fails
   with 'MissingCredentialsError'. Check server/install/mcp-server.service."
-# Automation must never be able to switch the policy editor on. The rule is
-# unchanged; what changed is that there is now one legitimate way to reach the
-# active state, --enable-authz-editor, which only a person invoking the installer
-# can supply. Anything else that produces an active line, a stray template edit or
-# a sed that matched too much, is still refused here.
-if [ "$ENABLE_AUTHZ_EDITOR" != 1 ]; then
+# The rendered unit must agree with site.env. This catches an active line the
+# installer did not put there: a stray template edit, or a sed that matched more
+# than it meant to. It is a consistency check on the render, not a policy gate.
+if [ "$AUTHZ_EDITOR_ON" != 1 ]; then
     grep -q '^Environment=MCP_AUTHZ_EDITOR' "$RENDER/mcp-server.service" \
         && die "rendered unit has an ACTIVE MCP_AUTHZ_EDITOR line but
-  --enable-authz-editor was not given. The policy editor must never switch itself
-  on. Check server/install/mcp-server.service for an uncommented line."
+  MCP_AUTHZ_EDITOR is off in $SITE_ENV. The unit must not disagree with the file
+  it was rendered from. Check server/install/mcp-server.service for an
+  uncommented line."
     grep -qx 'StateDirectory=mcp-server' "$RENDER/mcp-server.service" \
         && die "rendered unit has an ACTIVE StateDirectory but the policy editor is
   off; nothing else needs a writable state directory. Check the template."
@@ -1372,7 +1343,7 @@ awk -v blk="$CLIENT_BLOCK" '{
 #
 # Tied to the same flag as the unit: switching the editor on in one place and not
 # the other is how it ends up served but unusable.
-if [ "$ENABLE_AUTHZ_EDITOR" = 1 ]; then
+if [ "$AUTHZ_EDITOR_ON" = 1 ]; then
     /usr/bin/python3 - "$RENDER/mcp.conf" <<'PY'
 import re, sys
 p = sys.argv[1]

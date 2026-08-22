@@ -1,79 +1,90 @@
-"""The installer must not turn the policy editor off by omission.
+"""The policy editor is a site.env key, and the installer must converge on it.
 
 run.sh cannot be driven from a unit test: it needs root, a real systemd, a real
 keytab and a live KDC. So this reads the script rather than running it. That is
 weaker than a behavioural test and worth stating plainly; what it defends
-against is the realistic regression, which is the guard being dropped or
-loosened during an edit, not the guard being subtly wrong.
+against is the realistic regression, which is the setting drifting back into an
+invocation flag during an edit.
 
-Why it exists. --enable-authz-editor is a flag and deliberately not a site.env
-key, because the editor is an authenticated write surface over tool
-authorization and enabling it should be a person's decision, not a parameter
-file's. The cost of that design is that a plain re-run, which is how every other
-setting converges, silently switched it OFF. That happened on a live host: a
-routine re-run to deploy an unrelated fix took the editor down, and the only
-symptom was a 404 on a page nobody had open.
+History, because the shape here is a reversal and the reasons matter.
 
-The consequence was not cosmetic. With the editor off the server stops reading
+MCP_AUTHZ_EDITOR was once a flag, --enable-authz-editor, and refused outright if
+it appeared in site.env. The reasoning was that the editor is an authenticated
+write surface over tool authorization, so enabling it should be a person's
+decision rather than a parameter file's.
+
+That reasoning did not hold. site.env is 0640 root:root on the host and nothing
+writes it automatically, so setting the key and passing the flag require exactly
+the same privilege: root on that machine. The flag gated nothing the file did
+not already gate.
+
+It did cost. Living only in the invocation, the state was recorded nowhere, so a
+host rebuilt from site.env came up WITHOUT the editor and nothing said so. And a
+plain re-run, which is how every other setting converges, silently switched it
+OFF. That happened on a live host: a routine re-run to deploy an unrelated fix
+took the editor down, and the only symptom was a 404 on a page nobody had open.
+
+That consequence was not cosmetic. With the editor off the server stops reading
 the policy overlay, so the reviewed in-code defaults become the live policy and
 every tool the overlay was managing silently changes hands. The file itself was
 never touched, which is what made it hard to see: the policy was intact and
 unread.
+
+As a key, a re-run reads the same file and converges, so that failure cannot
+happen, and the state is somewhere it can be reviewed and reproduced.
 """
 import re
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN = (ROOT / "server" / "install" / "run.sh").read_text(encoding="utf-8")
+INSTALL = ROOT / "server" / "install"
+RUN = (INSTALL / "run.sh").read_text(encoding="utf-8")
+EXAMPLE = (INSTALL / "site.env.example").read_text(encoding="utf-8")
 
 
-class TheGuardExists(unittest.TestCase):
+class TheSettingIsAKey(unittest.TestCase):
 
-    def test_both_flags_are_accepted(self):
+    def test_the_flags_are_gone_from_the_argument_parser(self):
+        # A stray case arm would give two ways to set one thing, and they would
+        # eventually disagree.
         for flag in ("--enable-authz-editor", "--disable-authz-editor"):
-            self.assertRegex(
+            self.assertNotRegex(
                 RUN, r"\n\s*%s\)" % re.escape(flag),
-                "%s is not in the argument parser, so it cannot be asked for" % flag)
+                "%s is back in the argument parser" % flag)
 
-    def test_a_plain_rerun_refuses_when_the_editor_is_on(self):
-        # The condition that matters: no enable, no explicit disable, and the
-        # INSTALLED unit says the editor is on.
-        self.assertRegex(
+    def test_site_env_is_no_longer_refused_for_carrying_the_key(self):
+        self.assertNotIn(
+            'MCP_AUTHZ_EDITOR is set in $SITE_ENV, and it is not settable there',
             RUN,
-            r'\[ "\$ENABLE_AUTHZ_EDITOR" != 1 \]\s*&&\s*\[ "\$DISABLE_AUTHZ_EDITOR" != 1 \]'
-            r'[\s\\]*&&\s*\[ -f "\$UNIT" \]'
-            r'[\s\\]*&&\s*grep -q .\^Environment=MCP_AUTHZ_EDITOR=1',
-            "the guard against silently disabling the editor is gone or its "
-            "condition changed shape")
+            "the installer still rejects the key it is now supposed to read")
 
-    def test_the_guard_reads_the_installed_unit_not_site_env(self):
-        # Inferring "it was on" from site.env would re-open the hole the
-        # MCP_AUTHZ_EDITOR check closes: a parameter file would once again decide
-        # whether an authenticated write surface is served. The installed unit is
-        # the state the host is actually in.
-        guard = RUN[RUN.index('would turn it off') - 1200:RUN.index('would turn it off')]
-        self.assertIn('"$UNIT"', guard)
-        self.assertNotIn('SITE_ENV', guard)
+    def test_the_key_is_parsed_into_one_variable(self):
+        self.assertRegex(
+            RUN, r'case "\$\(printf .%s. "\$\{MCP_AUTHZ_EDITOR:-\}"',
+            "MCP_AUTHZ_EDITOR is not parsed from site.env any more")
+        self.assertIn("AUTHZ_EDITOR_ON=1", RUN)
+        self.assertIn("AUTHZ_EDITOR_ON=0", RUN)
 
-    def test_the_guard_names_both_ways_out(self):
-        # A refusal that does not say what to type is a worse outage than the
-        # one it prevents.
-        stop = RUN[RUN.index('the policy editor is ON on this host'):][:1200]
-        self.assertIn('--enable-authz-editor', stop)
-        self.assertIn('--disable-authz-editor', stop)
+    def test_an_unparseable_value_is_refused_rather_than_guessed(self):
+        # Defaulting either way is wrong: guessing "off" silently disables an
+        # authorization surface, guessing "on" silently serves one.
+        self.assertIn("neither\n  on nor off", RUN)
 
-    def test_the_stop_explains_the_authorization_consequence(self):
-        # Someone hitting this needs to know it is not a cosmetic toggle.
-        stop = RUN[RUN.index('the policy editor is ON on this host'):][:1200]
-        self.assertIn('$MCP_POLICY_FILE', stop,
-                      "the refusal should name the policy file that stops being read")
+    def test_the_example_documents_the_key_and_defaults_it_off(self):
+        self.assertRegex(EXAMPLE, r"(?m)^MCP_AUTHZ_EDITOR=off\s*$",
+                         "site.env.example should ship the key, defaulted off")
 
-    def test_enabling_is_still_a_flag_and_never_a_site_env_key(self):
-        # The guard must not have been implemented by making the editor
-        # configurable from site.env, which would be the easy wrong fix.
-        self.assertIn('MCP_AUTHZ_EDITOR is set in $SITE_ENV, and it is not settable there',
-                      RUN)
+    def test_enabling_still_requires_admins(self):
+        # An editor with no admins authenticates everyone and authorises nobody,
+        # and the only way to discover that is to open it.
+        self.assertIn("MCP_AUTHZ_EDITOR is on, so $SITE_ENV needs MCP_POLICY_ADMINS", RUN)
+
+    def test_the_state_directory_is_still_tied_to_the_editor(self):
+        # ProtectSystem=strict makes everything else read-only, so without the
+        # state directory the editor starts, authenticates, and fails only when
+        # somebody tries to save.
+        self.assertIn("StateDirectory=mcp-server", RUN)
 
 
 if __name__ == "__main__":
