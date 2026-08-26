@@ -1708,7 +1708,7 @@ if [ "$SERVE_CLIENT" = yes ] || [ -n "$CLIENT_EXPORT" ]; then
     # A published installer with no published uninstaller is a one-way door.
     # test_client_kit_completeness.py now fails if any top-level client script is
     # missing here, which is the general form of that bug.
-    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh JsoncEdit.ps1 uninstall.sh uninstall.ps1 bridge/mcp-krb-bridge.py bridge/mcp-krb-remote-bridge.py bridge/mcp-fetch bridge/mcp-krb web/index.html web/app.js web/config.example.js"
+    BUNDLE_FILES="setup.sh setup.ps1 setup-macos.sh install-bridge.sh install-anchor.sh JsoncEdit.ps1 uninstall.sh uninstall.ps1 bridge/mcp-krb-bridge.py bridge/mcp-krb-remote-bridge.py bridge/mcp-fetch bridge/mcp-krb web/index.html web/app.js web/config.example.js"
     # Injects the site fragment into the page's markers and derives one nav
     # entry per section from its id and <h2>. Refuses a fragment that is not
     # root-owned or is group/world-writable: it becomes markup on the page that
