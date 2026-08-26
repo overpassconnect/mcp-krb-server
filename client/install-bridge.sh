@@ -67,6 +67,11 @@ BRIDGE="mcp-krb-bridge.py"
 REMOTE="mcp-krb-remote-bridge.py"
 FETCH="mcp-fetch"
 FETCH_LINK="/usr/local/bin/mcp-fetch"
+# The one command an MCP client is pointed at. It picks the local or the remote
+# bridge at spawn time by whether the forwarded socket is present, exactly as
+# mcp-fetch does, so the managed-mcp.json entry is the same on a workstation and
+# on a shared host. Installed everywhere for the same reason as the remote bridge.
+LAUNCH="mcp-krb"
 MANIFEST="$DEST/install-manifest.json"
 
 # --- install manifest ---------------------------------------------------------
@@ -297,7 +302,7 @@ fetch_retry() {
     return 1
 }
 
-for f in "$BRIDGE" "$REMOTE" "$FETCH"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH"; do
     fetch_retry "$f" "$tmp/$f" || {
         echo "ERROR: could not fetch $BASE/$f - nothing was installed." >&2
         echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
@@ -313,7 +318,7 @@ done
 # created may be recorded as removable in the manifest.
 DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
-for f in "$BRIDGE" "$REMOTE" "$FETCH"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH"; do
     $SUDO install -m 0755 "$tmp/$f" "$DEST/$f"
 done
 
@@ -338,7 +343,7 @@ fi
 python3 -c 'import gssapi' 2>/dev/null || \
     echo "WARNING: python3-gssapi not found - is this machine ipa-client-enrolled?" >&2
 
-REG='{"mcpServers":{"internal-tools":{"type":"stdio","command":"/usr/bin/python3","args":["'"$DEST/$BRIDGE"'","'"$MCP_URL"'"]}}}'
+REG='{"mcpServers":{"internal-tools":{"type":"stdio","command":"'"$DEST/$LAUNCH"'","args":["'"$MCP_URL"'"]}}}'
 
 MANAGED_WROTE=0
 ETC_EXISTED=0; [ -d /etc/claude-code ] && ETC_EXISTED=1
@@ -364,7 +369,7 @@ fi
 # path below is script-literal, which is what makes building the JSON by
 # concatenation safe. Non-fatal on failure, but loud: an install without a
 # manifest still works today and cannot be cleanly uninstalled tomorrow.
-FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\""
+FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$LAUNCH\""
 [ "$FETCH_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_LINK\""
 [ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
 FRAG_DIRS=""

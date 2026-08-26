@@ -1,0 +1,81 @@
+#!/bin/sh
+# mcp-krb - start the MCP stdio bridge, local or remote, without being told which.
+#
+# One registered command for every machine. Which bridge runs is decided the
+# same way mcp-fetch decides it, by whether the forwarded socket is present, so
+# the managed-mcp.json entry is identical on a workstation and on a shared host
+# and nobody has to remember what kind of machine they are on:
+#
+#   on a workstation    no forwarded socket, so the local bridge runs and does
+#                       the MCP call with your own ticket
+#   on a shared host    the socket that `ssh -R` forwarded is present, so this
+#                       joins stdio to it and the workstation does the call
+#
+# A socket is not a credential: it cannot be copied off the host or replayed,
+# and it exists only while your ssh session holds it open. Every restriction on
+# what may be done is enforced on the workstation in both cases (README, "Why
+# there is a server at all"; "Using it from a shared host").
+#
+#   mcp-krb https://mcp.example.internal/
+#
+# The URL is used only in the local case; the remote bridge takes the far end
+# from the socket. It is still passed always, so the one managed-mcp.json entry
+# needs no per-machine editing.
+set -eu
+
+MCP_URL="${1:-}"
+
+# The forwarded MCP socket. Same default shape as mcp-fetch's fetch socket, and
+# the same override, so the pair move together.
+SOCKET="${MCP_KRB_SOCKET:-/run/user/$(id -u)/mcp-krb.sock}"
+
+# MCP_KRB_HOME is an override, so it is obeyed exactly: pointing it somewhere
+# empty is an error, not a reason to quietly use the system install. Identical
+# resolution to mcp-fetch, on purpose.
+if [ -n "${MCP_KRB_HOME:-}" ]; then
+    APPDIR="$MCP_KRB_HOME"
+    if [ ! -f "$APPDIR/mcp-krb-bridge.py" ] && [ ! -f "$APPDIR/mcp-krb-remote-bridge.py" ]; then
+        echo "mcp-krb: MCP_KRB_HOME=$APPDIR holds no bridge." >&2
+        exit 2
+    fi
+else
+    # The two directories this kit installs to, in the order a machine has them.
+    APPDIR=""
+    for _d in /opt/mcp-krb "$HOME/Library/Application Support/mcp-krb"; do
+        if [ -f "$_d/mcp-krb-bridge.py" ] || [ -f "$_d/mcp-krb-remote-bridge.py" ]; then
+            APPDIR="$_d"
+            break
+        fi
+    done
+    if [ -z "$APPDIR" ]; then
+        echo "mcp-krb: no bridge installed. Looked in /opt/mcp-krb and" >&2
+        echo "  \$HOME/Library/Application Support/mcp-krb. Set MCP_KRB_HOME to" >&2
+        echo "  point at another directory." >&2
+        exit 2
+    fi
+fi
+
+# macOS installs into a venv because python-gssapi is not a system package
+# there; Linux gets it from ipa-client and uses the system interpreter.
+if [ -x "$APPDIR/venv/bin/python3" ]; then
+    PY="$APPDIR/venv/bin/python3"
+else
+    PY=python3
+fi
+
+# A live forwarded socket means this is a shared host: hand stdio to the remote
+# bridge, which holds nothing and reaches the workstation over the socket.
+if [ -S "$SOCKET" ]; then
+    exec "$PY" "$APPDIR/mcp-krb-remote-bridge.py" "$SOCKET"
+fi
+
+# No socket: run the ticket-holding bridge here. On a workstation that is right.
+# On a shared host with no forward up, there is no ticket either, so the bridge
+# exits with a clear "no Kerberos" rather than this wrapper second-guessing it.
+if [ -z "$MCP_URL" ]; then
+    echo "mcp-krb: no forwarded socket at $SOCKET, and no MCP URL was given for" >&2
+    echo "  the local bridge. Pass the MCP base URL, or open the ssh -R forward;" >&2
+    echo "  see client/README.md, 'Using it from a shared host'." >&2
+    exit 2
+fi
+exec "$PY" "$APPDIR/mcp-krb-bridge.py" "$MCP_URL"

@@ -1239,8 +1239,8 @@ if ($mcpDone) {
     $mcpServerEntry = @{
         type    = 'stdio'
         command = 'wsl.exe'
-        args    = @('-d', $distro, '-e', '/usr/bin/python3',
-                    '/opt/mcp-krb/mcp-krb-bridge.py', "$McpBase/")
+        args    = @('-d', $distro, '-e',
+                    '/opt/mcp-krb/mcp-krb', "$McpBase/")
     }
     $mcpEntry = @{ mcpServers = @{ 'internal-tools' = $mcpServerEntry } }
     $mcpJson = $mcpEntry | ConvertTo-Json -Depth 6 -Compress

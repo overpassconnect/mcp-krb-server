@@ -318,7 +318,7 @@ else
         # wrapper that picks between them. A Mac is a workstation and will
         # normally use only the first, but it is also the machine that forwards
         # the socket, and mcp-fetch is the command its owner types.
-        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch; do
+        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch mcp-krb; do
             curl --proto '=https' --tlsv1.2 -fsS "$BASE_URL/$f" -o "$APPDIR/$f"
             chmod 0755 "$APPDIR/$f"
             note_created "$APPDIR/$f"
@@ -327,7 +327,7 @@ else
         say "mcp-fetch at $APPDIR/mcp-fetch (add $APPDIR to PATH to type it plainly)"
 
         PY="$APPDIR/venv/bin/python3"
-        ENTRY="{\"type\":\"stdio\",\"command\":\"$PY\",\"args\":[\"$APPDIR/mcp-krb-bridge.py\",\"$MCP_URL\"]}"
+        ENTRY="{\"type\":\"stdio\",\"command\":\"$APPDIR/mcp-krb\",\"args\":[\"$MCP_URL\"]}"
 
         # Three different files could be meant here and only one is Claude Code's.
         # Getting this wrong registers the server somewhere nothing reads:
@@ -365,9 +365,8 @@ else
 import json, os, pathlib, shutil
 cfg = pathlib.Path.home() / ".claude.json"
 entry = {"type": "stdio",
-         "command": os.environ["PY"],
-         "args": [os.path.join(os.environ["APPDIR"], "mcp-krb-bridge.py"),
-                  os.environ["MCP_URL"]]}
+         "command": os.path.join(os.environ["APPDIR"], "mcp-krb"),
+         "args": [os.environ["MCP_URL"]]}
 if cfg.exists():
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))

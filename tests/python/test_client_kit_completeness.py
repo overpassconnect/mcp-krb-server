@@ -34,6 +34,17 @@ def bundle_files():
     return [f.split("/")[-1] for f in m.group(1).split()]
 
 
+def macos_fetch_list():
+    # The literal `for f in ... ; do` list setup-macos.sh curls one by one.
+    # Parsed, not substring-searched: "mcp-krb" is a substring of
+    # "mcp-krb-bridge.py", so a plain `in` over the whole file green-lit a
+    # launcher the Mac never fetched. Exact tokens only.
+    for line in MACOS.splitlines():
+        if "for f in" in line and "mcp-krb-bridge.py" in line:
+            return line.split("for f in", 1)[1].split(";", 1)[0].split()
+    raise AssertionError("setup-macos.sh bridge fetch loop not found")
+
+
 class TestEverythingShippedIsPublished(unittest.TestCase):
 
     def test_the_bridge_directory_is_not_empty(self):
@@ -163,8 +174,9 @@ class TestMacOsInstallsTheSameKit(unittest.TestCase):
     def test_macos_fetches_every_bridge_file(self):
         # A Mac gets the files individually rather than through
         # install-bridge.sh, which is exactly how it fell a file behind.
+        fetched = macos_fetch_list()
         for name in SHIPPED:
-            self.assertIn(name, MACOS,
+            self.assertIn(name, fetched,
                           "setup-macos.sh never fetches %s, so a Mac ends up with "
                           "a partial kit" % name)
 

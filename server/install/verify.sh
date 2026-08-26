@@ -627,7 +627,7 @@ else
     # The client scripts and bridges, plus the page and its runtime (app.js,
     # config.js). config.js is what carries the site values; a page without it
     # shows <set ... in config.js> markers, so its absence is a real failure.
-    for _f in setup.sh setup.ps1 install-bridge.sh JsoncEdit.ps1 mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch index.html app.js config.js; do
+    for _f in setup.sh setup.ps1 install-bridge.sh JsoncEdit.ps1 mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch mcp-krb index.html app.js config.js; do
         _code="$(curl --proto '=https' --tlsv1.2 -sS --max-time 15                       -o /dev/null -w '%{http_code}'                       "https://$FQDN$CLIENT_PATH$_f" 2>/dev/null)"
         [ -n "$_code" ] || _code=000
         case "$_code" in
