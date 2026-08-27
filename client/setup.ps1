@@ -908,7 +908,7 @@ $kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i+
 # outside WSL, so unlike ssh and git there is no native `kinit` these could
 # shadow. Naming them wsl* anyway keeps one rule for the whole set rather than
 # an exception to remember.
-$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm } }   # Kerberos kinit via WSL (setup.ps1)"
+$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm }; if (`$?) { wsl.exe -e sh -c 'systemctl --user is-active mcp-krb-anchor-mcp.service >/dev/null 2>&1 || { [ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url $McpBase/ --domain $Domain --ipa-url https://$Kdc; }' } }   # Kerberos kinit + reverse-bridge anchor via WSL (setup.ps1)"
 $kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
 $kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
@@ -1307,6 +1307,8 @@ if ($mcpDone) {
     Write-Host "    claude mcp list                  # internal-tools should be listed" -ForegroundColor Green
 }
 Write-Host ''
+Say 'The reverse-bridge anchor sets itself up on your first wsl kinit, so a plain'
+Say 'ssh to a shared host forwards your MCP socket automatically (VS Code too).'
 Say 'Your existing `ssh`, keys, host aliases and known_hosts are untouched.'
 Say 'Use `wslgit` for clone/fetch/pull/push; plain `git` still handles everything local.'
 if ($mcpDone) {

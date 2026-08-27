@@ -155,6 +155,10 @@ path_is_ours() {
         /etc/apt/preferences.d/mozilla) return 0 ;;
         /etc/apt/keyrings/packages.mozilla.org.asc) return 0 ;;
         /etc/firefox/policies|/etc/firefox/policies/*) return 0 ;;
+        # The sshd drop-in setup.sh writes on a shared host so the reverse
+        # bridge's forwarded socket rebinds. Removed only when the manifest
+        # records this kit created it.
+        /etc/ssh/sshd_config.d/50-mcp-krb-streamlocal.conf) return 0 ;;
         /etc/krb5.conf) return 0 ;;
         /etc/resolver/*) return 0 ;;
         /usr/local/share/ca-certificates/*) return 0 ;;
@@ -181,6 +185,31 @@ if [ -f "$ROOT$MANAGED_FILE" ]; then
 fi
 say "  note: a per-user registration made with 'claude mcp add' is yours, not"
 say "  the installer's: remove it with 'claude mcp remove internal-tools'."
+
+# 1b. The reverse-bridge anchor is per-user: its systemd --user service and its
+#     ssh RemoteForward block belong to the person who ran install-anchor.sh, not
+#     to root, so root cannot see them. Tear it down as that person while
+#     install-anchor.sh still exists (step 3 removes the kit tree). Under sudo,
+#     SUDO_USER names them; without it there is nobody to act as, and the note is
+#     the fallback.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    _auid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+    _anchor="$ROOT$APPROOT/install-anchor.sh"
+    if [ -n "$_auid" ] && [ -x "$_anchor" ]; then
+        if [ "$YES" = 1 ]; then
+            say "tearing down the per-user reverse-bridge anchor for $SUDO_USER"
+            sudo -u "$SUDO_USER" XDG_RUNTIME_DIR="/run/user/$_auid" \
+                "$_anchor" --uninstall 2>/dev/null \
+                || say "  could not; run '$APPROOT/install-anchor.sh --uninstall' as $SUDO_USER"
+        else
+            say "would tear down the per-user reverse-bridge anchor for $SUDO_USER"
+        fi
+    fi
+else
+    say "note: if you set up the reverse-bridge anchor, run"
+    say "  '$APPROOT/install-anchor.sh --uninstall' as yourself; it is a per-user"
+    say "  service this root uninstall cannot see."
+fi
 
 # 2. Files the manifest says an installer created, except the kit tree's own
 #    contents (the whole tree goes in step 3) and the realm CA (step 6, because

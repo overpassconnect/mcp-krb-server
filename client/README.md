@@ -1084,6 +1084,15 @@ directory.
 
 ### Using it from a shared host
 
+The workstation installers set this up for you. After your first `kinit`,
+`install-anchor.sh` runs (automatically from `wslkinit` on Windows, and from the
+printed one-line command on macOS): it serves the two sockets from a
+`systemd --user` service or a launchd agent, reads your realm uid from IPA to
+fill in the `RemoteForward` paths, and adds them to `~/.ssh/config`. A plain
+`ssh` to a `*.<domain>` host then forwards them with nothing on the command
+line, which is what VS Code Remote-SSH does. `install-anchor.sh --uninstall`
+reverses it. The rest of this section is what that automates, done by hand.
+
 A shared dev host holds a *machine* keytab and no user ticket, by design:
 `ssh` runs with `GSSAPIDelegateCredentials no`, so nothing of yours is copied
 there. That leaves it unable to fetch anything as you, which is the point.

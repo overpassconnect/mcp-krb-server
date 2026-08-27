@@ -318,7 +318,7 @@ else
         # wrapper that picks between them. A Mac is a workstation and will
         # normally use only the first, but it is also the machine that forwards
         # the socket, and mcp-fetch is the command its owner types.
-        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch mcp-krb; do
+        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch mcp-krb install-anchor.sh; do
             curl --proto '=https' --tlsv1.2 -fsS "$BASE_URL/$f" -o "$APPDIR/$f"
             chmod 0755 "$APPDIR/$f"
             note_created "$APPDIR/$f"
@@ -447,6 +447,14 @@ echo
 echo "==> done. Get a ticket:"
 echo "      kinit $IPA_USER@$REALM"
 echo "      klist -v          # -v is the Heimdal spelling; klist -f is MIT's"
+if [ -x "$APPDIR/install-anchor.sh" ]; then
+    echo
+    echo "    Then set up the reverse-bridge anchor once, after that first kinit:"
+    echo "      sh $APPDIR/install-anchor.sh --mcp-url $MCP_URL --domain $DOMAIN --ipa-url https://$KDC"
+    echo "    It serves your MCP and fetch sockets and forwards them to shared"
+    echo "    hosts, so Claude Code there reaches the server as you with no ticket"
+    echo "    of its own. See client/README.md, \"Using it from a shared host\"."
+fi
 echo
 echo "    Then ssh anything.$DOMAIN with no password."
 echo "    VS Code Remote-SSH needs no configuration on macOS: the system ssh"

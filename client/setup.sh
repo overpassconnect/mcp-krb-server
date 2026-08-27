@@ -204,6 +204,28 @@ if command -v systemd-detect-virt >/dev/null 2>&1 \
     echo "      'touch /etc/.pve-ignore.hostname' before setting it." >&2
 fi
 
+# A shared host is where the reverse bridge's sockets land, forwarded by the
+# workstation's ssh -R. Without StreamLocalBindUnlink the forwarded socket file
+# outlives the session and the next connection cannot bind it: the forward works
+# once and never again. Set it in a drop-in so the main sshd_config is untouched
+# and uninstall can lift it by deleting one file. Harmless on a workstation, which
+# simply never receives such a forward. Recorded in the manifest below.
+STREAMLOCAL_DROPIN=""
+if [ -d /etc/ssh/sshd_config.d ] && command -v sshd >/dev/null 2>&1; then
+    _d=/etc/ssh/sshd_config.d/50-mcp-krb-streamlocal.conf
+    if [ ! -f "$_d" ]; then
+        printf '%s\n' '# Added by mcp-krb setup.sh: let the reverse-bridge socket forwarded by' \
+            '# ssh -R rebind cleanly instead of failing once its file is left behind.' \
+            'StreamLocalBindUnlink yes' | $SUDO tee "$_d" >/dev/null
+        $SUDO chmod 0644 "$_d"
+        # reload, not restart: this very session must not be dropped.
+        $SUDO systemctl reload ssh 2>/dev/null \
+            || $SUDO systemctl reload sshd 2>/dev/null || true
+        echo "Set StreamLocalBindUnlink in $_d so reverse-bridge forwards rebind cleanly."
+        STREAMLOCAL_DROPIN="$_d"
+    fi
+fi
+
 # ============================================================================
 # PHASE 2 of 2: install the MCP bridge.
 # Fetches and runs install-bridge.sh, the same standalone script setup.ps1 and
@@ -298,8 +320,15 @@ sh "$installer" --managed --base-url "$BASE_URL" --mcp-url "$MCP_URL"
 # place. An older published installer without --manifest-merge is not worth
 # failing an already-successful enrolment over: warn and move on, the cost is
 # an uninstall that leaves that package alone.
-if [ -n "$IPA_PKG_INSTALLED" ]; then
+# Fold what only this script knows into the manifest install-bridge.sh wrote:
+# the enrolment-time package, and the sshd drop-in that lets forwards rebind.
+_FRAG_PKG=""
+[ -n "$IPA_PKG_INSTALLED" ] && _FRAG_PKG='"packages_installed": ["'"$IPA_PKG_INSTALLED"'"]'
+_FRAG_CREATED=""
+[ -n "$STREAMLOCAL_DROPIN" ] && _FRAG_CREATED='"created": ["'"$STREAMLOCAL_DROPIN"'"]'
+if [ -n "$_FRAG_PKG" ] || [ -n "$_FRAG_CREATED" ]; then
+    _SEP=""; [ -n "$_FRAG_PKG" ] && [ -n "$_FRAG_CREATED" ] && _SEP=", "
     $SUDO sh "$installer" --manifest-merge /opt/mcp-krb/install-manifest.json \
-        '{"written_by": "setup.sh", "packages_installed": ["'"$IPA_PKG_INSTALLED"'"]}' \
-        || echo "WARNING: could not record $IPA_PKG_INSTALLED in the install manifest - uninstall.sh will leave that package alone." >&2
+        '{"written_by": "setup.sh", '"$_FRAG_PKG$_SEP$_FRAG_CREATED"'}' \
+        || echo "WARNING: could not update the install manifest - uninstall.sh may leave the package or the sshd drop-in behind." >&2
 fi

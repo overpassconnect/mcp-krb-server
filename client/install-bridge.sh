@@ -72,6 +72,11 @@ FETCH_LINK="/usr/local/bin/mcp-fetch"
 # mcp-fetch does, so the managed-mcp.json entry is the same on a workstation and
 # on a shared host. Installed everywhere for the same reason as the remote bridge.
 LAUNCH="mcp-krb"
+# The anchor setup script. Installed beside the bridge so a workstation can
+# run it once it holds a ticket, and so uninstall can find it. It is a no-op
+# on a shared host (it refuses to run as root and needs a ticket), so
+# installing it everywhere costs a file and simplifies the lifecycle.
+ANCHOR="install-anchor.sh"
 MANIFEST="$DEST/install-manifest.json"
 
 # --- install manifest ---------------------------------------------------------
@@ -302,7 +307,7 @@ fetch_retry() {
     return 1
 }
 
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH" "$ANCHOR"; do
     fetch_retry "$f" "$tmp/$f" || {
         echo "ERROR: could not fetch $BASE/$f - nothing was installed." >&2
         echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
@@ -318,7 +323,7 @@ done
 # created may be recorded as removable in the manifest.
 DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$LAUNCH" "$ANCHOR"; do
     $SUDO install -m 0755 "$tmp/$f" "$DEST/$f"
 done
 
@@ -369,7 +374,7 @@ fi
 # path below is script-literal, which is what makes building the JSON by
 # concatenation safe. Non-fatal on failure, but loud: an install without a
 # manifest still works today and cannot be cleanly uninstalled tomorrow.
-FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$LAUNCH\""
+FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$LAUNCH\", \"$DEST/$ANCHOR\""
 [ "$FETCH_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_LINK\""
 [ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
 FRAG_DIRS=""

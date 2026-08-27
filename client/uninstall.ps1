@@ -250,6 +250,13 @@ if ($distro) {
             [IO.File]::WriteAllText($tmp, $body)
             $wslPath = '/mnt/' + $tmp.Substring(0, 1).ToLower() + ($tmp.Substring(2) -replace '\\', '/')
             $mode = if ($act) { '--yes' } else { '--dry-run' }
+            # The reverse-bridge anchor is a per-user WSL service; tear it down as
+            # the user (default, not root) before the root uninstall removes the
+            # kit tree it lives in. --uninstall queries nothing, so no ticket is
+            # needed. Dry runs skip it, matching everything else here.
+            if ($act) {
+                & $WslCommand -d $distro -e sh -c '[ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --uninstall' 2>$null
+            }
             & $WslCommand -d $distro -u root -e sh $wslPath $mode
             if ($LASTEXITCODE -ne 0) {
                 Warn "WSL uninstall reported exit code $LASTEXITCODE - review its output above."
