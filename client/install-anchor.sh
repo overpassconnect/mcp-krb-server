@@ -100,7 +100,9 @@ fi
 # workstation's local uid when the workstation is not itself enrolled (a plain
 # WSL box holds a ticket without an SSSD identity). So it is read from IPA with
 # the ticket we hold now, and a missing ticket is a hard stop, not a guess.
-princ="$(klist 2>/dev/null | sed -n 's/^Default principal: \([^@]*\)@.*/\1/p' | head -1)"
+# MIT klist labels it "Default principal:", Heimdal (macOS) says "Principal:",
+# so match the first user@realm in the output rather than a label, and cut at @.
+princ="$(klist 2>/dev/null | grep -oE '[[:alnum:]._-]+@[[:alnum:].-]+' | head -1 | cut -d@ -f1)"
 [ -n "$princ" ] || { echo "install-anchor.sh: no Kerberos ticket. Run kinit, then" >&2
     echo "  re-run: the VM-side uid is read from IPA and cannot be guessed." >&2; exit 2; }
 
