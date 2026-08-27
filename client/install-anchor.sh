@@ -119,7 +119,7 @@ uid="$(curl -sS $CA --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
     -H 'Content-Type: application/json' -H 'Accept: application/json' \
     -d '{"method":"user_show","params":[["'"$princ"'"],{"version":"2.251"}],"id":0}' \
     "$IPA_URL/ipa/session/json" 2>/dev/null \
-    | $PY -c 'import json,sys; print(json.load(sys.stdin)["result"]["result"]["uidnumber"][0])' 2>/dev/null || true)"
+    | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["result"]["result"]["uidnumber"][0])' 2>/dev/null || true)"
 case "$uid" in
     ''|*[!0-9]*) echo "install-anchor.sh: could not read a numeric uid for $princ from IPA." >&2; exit 2 ;;
 esac
