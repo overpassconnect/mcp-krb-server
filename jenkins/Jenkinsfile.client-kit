@@ -1,0 +1,113 @@
+// Jenkinsfile for publishing the client kit to the join host.
+// Jenkins job name: production-client-kit  (folder: Mcp-Server)
+//
+// The gap this closes: the site layer (mcp-tools) had a deploy job, the client
+// kit never did. Every update to setup.*, the bridge or the launcher was a hand
+// -run run.sh export copied to join by hand, so join drifted from the repo.
+//
+// What it deploys, and what it deliberately does not:
+//
+//   YES  the download artifacts under join:/var/www/join/d  -- the installers
+//        (setup.sh/.ps1/setup-macos.sh, install-bridge.sh, install-anchor.sh,
+//        uninstall.*, JsoncEdit.ps1) and the bridge (mcp-krb-bridge.py,
+//        mcp-krb-remote-bridge.py, mcp-fetch, mcp-krb). run.sh copies these
+//        VERBATIM -- no templating -- so shipping them straight from the
+//        checkout is byte-identical to a run.sh export, without needing a
+//        site.env secret on the agent.
+//
+//   NO   the provisioning page (index.html, app.js, config.js) at the docroot
+//        root. That carries deployment-specific pieces this public-repo job has
+//        no business owning: config.js is generated from site.env, the page has
+//        the site-sections fragment injected from the MCP host, and the favicons
+//        and logos are the deployment's own artwork, not in this repo. A job
+//        that redeployed the page would either erase those or need their
+//        secrets. So the page stays a separate concern; this job owns /d.
+//
+// The credential is the same folder-scoped production-ssh-key that
+// production-mcp-tools uses, so there is one key for the folder and no second
+// secret to rotate. The restriction is per host, set in each host's
+// authorized_keys, not in the key: on the MCP host it is a root deploy, on the
+// join host its entry is pinned to the Jenkins machines and forced to
+// `rrsync /var/www/join/d`, so a build that stole the key can write that one
+// directory on join and nothing else. Folder scoping keeps any job outside
+// Mcp-Server from binding it at all.
+//
+// The checkout is GitHub over the jenkins-github SSH key, the same as the jobs
+// that have not moved to Gitea yet: mcp-krb-server is a public GitHub repo, not
+// in Gitea. If it is mirrored to Gitea later, this becomes a Kerberos checkout
+// and the key goes away; see docs-general/jenkins-gitea-kerberos-checkout.md.
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'TARGET_HOST', defaultValue: '', description: '[OPTIONAL] Override the join host')
+    }
+
+    stages {
+
+        stage('Collect') {
+            // The set of files to publish is BUNDLE_FILES in run.sh, minus the
+            // web/ page files. Parsed from run.sh rather than restated here, so
+            // adding a bridge file or an installer to the kit needs no change to
+            // this pipeline -- the same single source of truth the completeness
+            // test reads.
+            steps {
+                sh '''
+set -eu
+DL=$(grep -oE 'BUNDLE_FILES="[^"]*"' server/install/run.sh | sed 's/.*="//; s/"$//')
+[ -n "$DL" ] || { echo "could not read BUNDLE_FILES from run.sh"; exit 1; }
+rm -rf .deploy && mkdir -p .deploy
+n=0
+for f in $DL; do
+    case "$f" in web/*) continue ;; esac      # page files are not ours to ship
+    [ -f "client/$f" ] || { echo "missing from checkout: client/$f"; exit 1; }
+    install -m 0644 "client/$f" ".deploy/$(basename "$f")"
+    n=$((n + 1))
+done
+echo "staged $n download file(s):"
+ls -1 .deploy | sort
+'''
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    def host = params.TARGET_HOST ?: 'join.overpassconnect.internal'
+                    withCredentials([sshUserPrivateKey(credentialsId: 'production-ssh-key',
+                                                       keyFileVariable: 'DKEY')]) {
+                        withEnv(["JOIN=root@${host}", "HOSTNAME_ONLY=${host}"]) {
+                            sh '''
+set -eu
+SSH="ssh -i $DKEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+# --delete converges /d to exactly the staged set, so a file dropped from the
+# kit (the stale install.sh was one) is removed rather than served forever.
+# No -o/-g: the key's forced rrsync runs as root, so files land root-owned; the
+# --chmod pins 0644 without depending on the agent's umask. rsync's own -e is
+# ignored under a forced command, so ssh is passed via RSYNC_RSH.
+RSYNC_RSH="$SSH" rsync -rlt --delete --chmod=F644 .deploy/ "$JOIN":
+echo "--- verifying served bytes match what we shipped ---"
+fail=0
+for f in mcp-krb install-anchor.sh install-bridge.sh; do
+    code=$(curl -sS -o "/tmp/v_$f" --cacert /etc/ipa/ca.crt \
+        -w '%{http_code}' "https://$HOSTNAME_ONLY/d/$f" || echo 000)
+    if [ "$code" != 200 ]; then echo "  $f: HTTP $code"; fail=1; continue; fi
+    src="client/$f"; [ "$f" = mcp-krb ] && src="client/bridge/mcp-krb"
+    if cmp -s "$src" "/tmp/v_$f"; then echo "  $f: HTTP 200, matches checkout"; else
+        echo "  $f: HTTP 200 but SERVED BYTES DIFFER from checkout"; fail=1; fi
+done
+[ "$fail" = 0 ] || { echo "verification failed"; exit 1; }
+echo "--- client kit published to $HOSTNAME_ONLY:/d ---"
+'''
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        failure { echo 'DEPLOYMENT FAILED: client kit to join' }
+    }
+}
