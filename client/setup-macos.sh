@@ -447,13 +447,38 @@ echo
 echo "==> done. Get a ticket:"
 echo "      kinit $IPA_USER@$REALM"
 echo "      klist -v          # -v is the Heimdal spelling; klist -f is MIT's"
+# Wire the user's kinit to configure the reverse-bridge anchor on first use, the
+# macOS counterpart of setup.sh's and setup.ps1's hooks. install-anchor.sh no-ops
+# silently once it is set up, so wrapping kinit is safe to run every time.
 if [ -x "$APPDIR/install-anchor.sh" ]; then
+    _mac_wired=""
+    for _rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+        [ -e "$_rc" ] || continue
+        _t="$(mktemp)" || continue
+        awk -v b='# BEGIN mcp-krb-anchor' -v e='# END mcp-krb-anchor' \
+            '$0==b{s=1} s&&$0==e{s=0;next} !s{print}' "$_rc" > "$_t"
+        {
+            cat "$_t"
+            echo '# BEGIN mcp-krb-anchor'
+            echo 'kinit() {'
+            echo '    command kinit "$@" || return'
+            echo "    _a=\"\$HOME/Library/Application Support/mcp-krb/install-anchor.sh\""
+            printf '    [ -x "$_a" ] && "$_a" --mcp-url %s --domain %s --ipa-url https://%s\n' \
+                "$MCP_URL" "$DOMAIN" "$KDC"
+            echo '}'
+            echo '# END mcp-krb-anchor'
+        } > "$_rc"
+        rm -f "$_t"
+        _mac_wired="$_mac_wired $(basename "$_rc")"
+    done
     echo
-    echo "    Then set up the reverse-bridge anchor once, after that first kinit:"
-    echo "      sh $APPDIR/install-anchor.sh --mcp-url $MCP_URL --domain $DOMAIN --ipa-url https://$KDC"
-    echo "    It serves your MCP and fetch sockets and forwards them to shared"
-    echo "    hosts, so Claude Code there reaches the server as you with no ticket"
-    echo "    of its own. See client/README.md, \"Using it from a shared host\"."
+    if [ -n "$_mac_wired" ]; then
+        echo "    Your kinit ($_mac_wired ) now sets up the reverse-bridge anchor on first use,"
+        echo "    so a plain ssh to a shared host forwards your MCP socket automatically."
+    else
+        echo "    Set up the reverse-bridge anchor once, after that first kinit:"
+        echo "      sh $APPDIR/install-anchor.sh --mcp-url $MCP_URL --domain $DOMAIN --ipa-url https://$KDC"
+    fi
 fi
 echo
 echo "    Then ssh anything.$DOMAIN with no password."

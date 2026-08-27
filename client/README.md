@@ -1085,8 +1085,9 @@ directory.
 ### Using it from a shared host
 
 The workstation installers set this up for you. After your first `kinit`,
-`install-anchor.sh` runs (automatically from `wslkinit` on Windows, and from the
-printed one-line command on macOS): it serves the two sockets from a
+`install-anchor.sh` runs (from a `kinit` hook the installer adds on every OS:
+`wslkinit` on Windows, a `kinit` shell-rc wrapper on Linux and macOS): it serves
+the two sockets from a
 `systemd --user` service or a launchd agent, reads your realm uid from IPA to
 fill in the `RemoteForward` paths, and adds them to `~/.ssh/config`. A plain
 `ssh` to a `*.<domain>` host then forwards them with nothing on the command

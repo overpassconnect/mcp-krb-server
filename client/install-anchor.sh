@@ -13,7 +13,7 @@
 # It is idempotent: re-running replaces the units and the ssh block in place.
 set -eu
 
-MCP_URL=""; DOMAIN=""; IPA_URL=""; DRY=0; UNINSTALL=0
+MCP_URL=""; DOMAIN=""; IPA_URL=""; DRY=0; UNINSTALL=0; FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --mcp-url)   MCP_URL="$2"; shift 2 ;;
@@ -21,6 +21,7 @@ while [ $# -gt 0 ]; do
         --ipa-url)   IPA_URL="$2"; shift 2 ;;
         --dry-run)   DRY=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
+        --force)     FORCE=1; shift ;;
         *) echo "install-anchor.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -80,6 +81,20 @@ done
 [ -n "$APPDIR" ] || { echo "install-anchor.sh: no bridge at /opt/mcp-krb or the macOS path." >&2
     echo "  Install the bridge first (install-bridge.sh / setup)." >&2; exit 2; }
 if [ -x "$APPDIR/venv/bin/python3" ]; then PY="$APPDIR/venv/bin/python3"; else PY=python3; fi
+
+# Already configured? A kinit wrapper calls this on every ticket, so a re-run
+# must be a silent no-op: units up and the ssh block present means nothing to do
+# and nothing to say. --force reconfigures anyway.
+if [ "$FORCE" != 1 ]; then
+    _up=0
+    if grep -q "^$BEGIN\$" "$HOME/.ssh/config" 2>/dev/null; then
+        case "$(uname -s)" in
+            Linux)  systemctl --user is-active mcp-krb-anchor-mcp.service >/dev/null 2>&1                     && systemctl --user is-active mcp-krb-anchor-fetch.service >/dev/null 2>&1 && _up=1 ;;
+            Darwin) launchctl list 2>/dev/null | grep -q "com\.overpassconnect\.mcp-krb\.anchor-mcp" && _up=1 ;;
+        esac
+    fi
+    [ "$_up" = 1 ] && exit 0
+fi
 
 # The VM-side uid. The same IPA uid on every enrolled host, but NOT this
 # workstation's local uid when the workstation is not itself enrolled (a plain

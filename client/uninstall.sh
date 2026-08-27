@@ -201,6 +201,17 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
             sudo -u "$SUDO_USER" XDG_RUNTIME_DIR="/run/user/$_auid" \
                 "$_anchor" --uninstall 2>/dev/null \
                 || say "  could not; run '$APPROOT/install-anchor.sh --uninstall' as $SUDO_USER"
+            # and remove the kinit wrapper setup.sh added to the user's shell rc
+            _uhome="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+            for _rc in "$_uhome/.bashrc" "$_uhome/.zshrc" "$_uhome/.bash_profile"; do
+                [ -f "$ROOT$_rc" ] || continue
+                grep -q '# BEGIN mcp-krb-anchor' "$ROOT$_rc" || continue
+                _t="$(mktemp)"
+                awk -v b='# BEGIN mcp-krb-anchor' -v e='# END mcp-krb-anchor' \
+                    '$0==b{s=1} s&&$0==e{s=0;next} !s{print}' "$ROOT$_rc" > "$_t"
+                cat "$_t" > "$ROOT$_rc"; rm -f "$_t"; chown "$SUDO_USER" "$ROOT$_rc" 2>/dev/null || true
+                say "  removed the kinit wrapper from $(basename "$_rc")"
+            done
         else
             say "would tear down the per-user reverse-bridge anchor for $SUDO_USER"
         fi

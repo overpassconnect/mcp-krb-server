@@ -332,3 +332,44 @@ if [ -n "$_FRAG_PKG" ] || [ -n "$_FRAG_CREATED" ]; then
         '{"written_by": "setup.sh", '"$_FRAG_PKG$_SEP$_FRAG_CREATED"'}' \
         || echo "WARNING: could not update the install manifest - uninstall.sh may leave the package or the sshd drop-in behind." >&2
 fi
+
+# --- workstation only: wire this user's kinit to the reverse-bridge anchor -----
+# The native-Linux counterpart of setup.ps1's wslkinit hook and the kinit wrapper
+# setup-macos.sh writes. A workstation must SERVE and forward the reverse-bridge
+# sockets, per user, once they hold a ticket, so wrap the invoking user's kinit
+# to run install-anchor.sh -- which no-ops silently once it is set up. Skipped on
+# an LXC (a shared dev host is a forward TARGET, never an anchor) and when no
+# ordinary user invoked this; the page's shared-host section covers doing it by
+# hand. The forward domain is the realm lowercased (so *.DOMAIN spans the realm,
+# not just this host's subdomain), and the IPA server comes from the enrolment.
+if [ "$SKIP_MCP" != 1 ] \
+        && [ "$(systemd-detect-virt 2>/dev/null || echo none)" != lxc ] \
+        && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != root ]; then
+    _ws_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    _realm="$(sed -n 's/^[[:space:]]*realm[[:space:]]*=[[:space:]]*//p' /etc/ipa/default.conf 2>/dev/null | head -1)"
+    _server="$(sed -n 's/^[[:space:]]*server[[:space:]]*=[[:space:]]*//p' /etc/ipa/default.conf 2>/dev/null | head -1)"
+    _domain="$(printf '%s' "$_realm" | tr 'A-Z' 'a-z')"
+    if [ -n "$_ws_home" ] && [ -d "$_ws_home" ] && [ -n "$_domain" ] && [ -n "$_server" ]; then
+        _wired=""
+        for _rc in "$_ws_home/.bashrc" "$_ws_home/.zshrc"; do
+            [ -e "$_rc" ] || continue      # only shells the user actually has
+            _t="$(mktemp)" || continue
+            awk -v b='# BEGIN mcp-krb-anchor' -v e='# END mcp-krb-anchor' \
+                '$0==b{s=1} s&&$0==e{s=0;next} !s{print}' "$_rc" > "$_t"
+            {
+                cat "$_t"
+                echo '# BEGIN mcp-krb-anchor'
+                echo 'kinit() {'
+                echo '    command kinit "$@" || return'
+                printf '    [ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url %s --domain %s --ipa-url https://%s\n' \
+                    "$MCP_URL" "$_domain" "$_server"
+                echo '}'
+                echo '# END mcp-krb-anchor'
+            } > "$_rc"
+            rm -f "$_t"
+            chown "$SUDO_USER" "$_rc" 2>/dev/null || true
+            _wired="$_wired $(basename "$_rc")"
+        done
+        [ -n "$_wired" ] && echo "Wired ${SUDO_USER}'s kinit ($_wired ) to configure the reverse-bridge anchor on first use."
+    fi
+fi
