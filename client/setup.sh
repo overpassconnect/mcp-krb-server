@@ -153,6 +153,20 @@ if ! command -v ipa-client-install >/dev/null 2>&1; then
     else echo "ERROR: ipa-client-install not found and no known package manager." >&2; exit 1; fi
 fi
 
+# Whatever the package step did, do not limp into ipa-client-install with a bare
+# "command not found" three steps from the real cause: confirm the binary is
+# actually here, or stop now with the reason. This is what turns "install the
+# client if needed" from a best effort into a guarantee. The usual culprit is an
+# apt-get update that could not reach the mirror (its failure above is
+# deliberately non-fatal) leaving freeipa-client uncached.
+if ! command -v ipa-client-install >/dev/null 2>&1; then
+    echo "ERROR: ipa-client-install is still missing after the package install"  >&2
+    echo "  attempt above. Most often apt-get update could not reach the mirror"  >&2
+    echo "  and freeipa-client was not in the cache. Fix this machine's network"  >&2
+    echo "  or apt sources and re-run; nothing has been enrolled."                >&2
+    exit 1
+fi
+
 # Guarantee the company-standard flags even if the caller omits them.
 case " $* " in *" --mkhomedir "*) ;; *) set -- --mkhomedir "$@" ;; esac
 case " $* " in *" --no-ntp "*)    ;; *) set -- --no-ntp "$@"    ;; esac
