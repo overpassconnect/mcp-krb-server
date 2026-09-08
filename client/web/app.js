@@ -88,9 +88,9 @@
    * that can be pasted as it stands. */
   function applyCaBlock(text) {
     if (SITE.caInstall === false) {
-      return text.replace(/^__CA_BEGIN__\n[\s\S]*?^__CA_END__\n/m, '');
+      return text.replace(/^__CA_BEGIN__\n[\s\S]*?^__CA_END__\n?/m, '');
     }
-    return text.replace(/^__CA_(?:BEGIN|END)__\n/gm, '');
+    return text.replace(/^__CA_(?:BEGIN|END)__\n?/gm, '');
   }
 
   function applySite(text) {
