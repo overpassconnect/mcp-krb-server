@@ -287,6 +287,13 @@ else
         CERT_SHA1=$(openssl x509 -noout -fingerprint -sha1 -in "$ca" \
                     | sed 's/.*=//; s/://g' | tr 'A-Z' 'a-z')
         say "recorded for removal (SHA-1): $CERT_SHA1"
+        # Persist the CA as a file too, not only in the keychain. install-anchor.sh
+        # pins its IPA lookup with --cacert on this file, which works whether curl
+        # is Apple's or Homebrew's; keychain trust reaches only Apple's curl. Lives
+        # under APPDIR so uninstall removes it with the rest of the kit.
+        mkdir -p "$APPDIR"
+        install -m 0644 "$ca" "$APPDIR/realm-ca.crt"
+        say "realm CA also saved to $APPDIR/realm-ca.crt for the anchor's IPA lookup"
     fi
     rm -f "$ca"
 fi

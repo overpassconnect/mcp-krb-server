@@ -106,8 +106,16 @@ princ="$(klist 2>/dev/null | grep -oE '[[:alnum:]._-]+@[[:alnum:].-]+' | head -1
 [ -n "$princ" ] || { echo "install-anchor.sh: no Kerberos ticket. Run kinit, then" >&2
     echo "  re-run: the VM-side uid is read from IPA and cannot be guessed." >&2; exit 2; }
 
+# The realm CA that pins the IPA lookup below. Linux enrolment leaves it at the
+# first path; setup-macos.sh saves it to the second, because a Mac has no
+# /etc/ipa and its curl may be Homebrew's, which ignores the System keychain the
+# CA was added to. An explicit --cacert on a file works whichever curl is first
+# on PATH; without it the lookup fails only on the Homebrew-curl Macs, which is
+# the intermittent "could not read a numeric uid" nobody could reproduce.
 CA=""
-[ -r /etc/ipa/ca.crt ] && CA="--cacert /etc/ipa/ca.crt"
+for _ca in /etc/ipa/ca.crt "$APPDIR/realm-ca.crt"; do
+    [ -r "$_ca" ] && { CA="--cacert $_ca"; break; }
+done
 CJ="$(mktemp)"; trap 'rm -f "$CJ"' EXIT
 # shellcheck disable=SC2086
 code="$(curl -sS -o /dev/null -w '%{http_code}' $CA --negotiate -u : -c "$CJ" \
