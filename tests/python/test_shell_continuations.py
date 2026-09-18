@@ -20,7 +20,7 @@ SHELL = sorted(
     # A command people type has no extension, which is exactly how it escapes a
     # glob written for scripts. It is shipped and run like the rest, so it is
     # checked like the rest.
-    + [ROOT / "client" / "bridge" / "mcp-fetch"]
+    + [ROOT / "client" / "bridge" / "mcp-fetch", ROOT / "client" / "bridge" / "krb-git"]
 )
 
 # A backslash-n with whitespace in front is a continuation someone flattened.

@@ -2,8 +2,9 @@
 # install-anchor.sh - make this workstation the reverse-bridge anchor.
 #
 # Per-user and unprivileged, the mirror of install-bridge.sh: that one installs
-# the bridge machine-wide as root, this one serves the two sockets a shared host
-# forwards back and adds the ssh RemoteForward that puts them there. Run as the
+# the bridge machine-wide as root, this one serves the three sockets a shared
+# host forwards back (MCP, fetch, git) and adds the ssh RemoteForward that puts
+# them there. Run as the
 # person who will hold the ticket, never as root: a systemd --user service and a
 # launchd LaunchAgent both belong to a login session, and the ticket the
 # listeners read is that person's.
@@ -45,19 +46,20 @@ strip_ssh_block() {
 if [ "$UNINSTALL" = 1 ]; then
     case "$(uname -s)" in
         Linux)
-            systemctl --user disable --now \
-                mcp-krb-anchor-mcp.service mcp-krb-anchor-fetch.service 2>/dev/null || true
+            systemctl --user disable --now mcp-krb-anchor-mcp.service \
+                mcp-krb-anchor-fetch.service mcp-krb-anchor-git.service 2>/dev/null || true
             rm -f "$HOME/.config/systemd/user/mcp-krb-anchor-mcp.service" \
-                  "$HOME/.config/systemd/user/mcp-krb-anchor-fetch.service"
+                  "$HOME/.config/systemd/user/mcp-krb-anchor-fetch.service" \
+                  "$HOME/.config/systemd/user/mcp-krb-anchor-git.service"
             systemctl --user daemon-reload 2>/dev/null || true ;;
         Darwin)
-            for _l in anchor-mcp anchor-fetch; do
+            for _l in anchor-mcp anchor-fetch anchor-git; do
                 launchctl bootout "gui/$(id -u)/com.overpassconnect.mcp-krb.$_l" 2>/dev/null || true
                 rm -f "$HOME/Library/LaunchAgents/com.overpassconnect.mcp-krb.$_l.plist"
             done ;;
     esac
     strip_ssh_block
-    rm -f "$HOME/.mcp-krb.sock" "$HOME/.mcp-krb-fetch.sock"
+    rm -f "$HOME/.mcp-krb.sock" "$HOME/.mcp-krb-fetch.sock" "$HOME/.mcp-krb-git.sock"
     echo "anchor: removed units/agents, the ssh block, and the sockets."
     exit 0
 fi
@@ -84,13 +86,24 @@ if [ -x "$APPDIR/venv/bin/python3" ]; then PY="$APPDIR/venv/bin/python3"; else P
 
 # Already configured? A kinit wrapper calls this on every ticket, so a re-run
 # must be a silent no-op: units up and the ssh block present means nothing to do
-# and nothing to say. --force reconfigures anyway.
+# and nothing to say. All three listeners are checked, so an anchor set up
+# before one of them existed is completed on the next kinit rather than left a
+# socket short. --force reconfigures anyway.
 if [ "$FORCE" != 1 ]; then
     _up=0
     if grep -q "^$BEGIN\$" "$HOME/.ssh/config" 2>/dev/null; then
+        _up=1
         case "$(uname -s)" in
-            Linux)  systemctl --user is-active mcp-krb-anchor-mcp.service >/dev/null 2>&1                     && systemctl --user is-active mcp-krb-anchor-fetch.service >/dev/null 2>&1 && _up=1 ;;
-            Darwin) launchctl list 2>/dev/null | grep -q "com\.overpassconnect\.mcp-krb\.anchor-mcp" && _up=1 ;;
+            Linux)
+                for _u in mcp fetch git; do
+                    systemctl --user is-active "mcp-krb-anchor-$_u.service" >/dev/null 2>&1 || _up=0
+                done ;;
+            Darwin)
+                _loaded="$(launchctl list 2>/dev/null)"
+                for _u in mcp fetch git; do
+                    printf '%s\n' "$_loaded" | grep -q "com\.overpassconnect\.mcp-krb\.anchor-$_u" || _up=0
+                done ;;
+            *) _up=0 ;;
         esac
     fi
     [ "$_up" = 1 ] && exit 0
@@ -133,19 +146,22 @@ case "$uid" in
 esac
 echo "anchor: $princ has IPA uid $uid; serving on this workstation."
 
-# Workstation-side sockets. Deliberately NOT /run/user/<uid>/mcp-krb.sock: that
-# is the path the launcher and mcp-fetch check to decide remote-vs-local, so the
-# anchor must serve elsewhere or this machine would route to itself.
+# Workstation-side sockets. Deliberately NOT /run/user/<uid>/mcp-krb*.sock: those
+# are the paths the launcher, mcp-fetch and krb-git check to decide
+# remote-vs-local, so the anchor must serve elsewhere or this machine would
+# route to itself.
 LSOCK="$HOME/.mcp-krb.sock"
 LFSOCK="$HOME/.mcp-krb-fetch.sock"
+LGSOCK="$HOME/.mcp-krb-git.sock"
 # The shared-host end, where ssh -R lands them and the launcher looks.
 RSOCK="/run/user/$uid/mcp-krb.sock"
 RFSOCK="/run/user/$uid/mcp-krb-fetch.sock"
+RGSOCK="/run/user/$uid/mcp-krb-git.sock"
 
 install_systemd() {
     UD="$HOME/.config/systemd/user"
     if [ "$DRY" = 1 ]; then
-        echo "would: write $UD/mcp-krb-anchor-{mcp,fetch}.service and enable --now both"
+        echo "would: write $UD/mcp-krb-anchor-{mcp,fetch,git}.service and enable --now all three"
         return 0
     fi
     mkdir -p "$UD"
@@ -179,8 +195,24 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 UNIT
+    cat > "$UD/mcp-krb-anchor-git.service" <<UNIT
+[Unit]
+Description=mcp-krb anchor: serve the git socket for hosts that forward it back
+Documentation=https://github.com/overpassconnect/mcp-krb-server
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=$PY $APPDIR/mcp-krb-bridge.py --git-listen %h/.mcp-krb-git.sock
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+UNIT
     systemctl --user daemon-reload
-    systemctl --user enable --now mcp-krb-anchor-mcp.service mcp-krb-anchor-fetch.service
+    systemctl --user enable --now mcp-krb-anchor-mcp.service \
+        mcp-krb-anchor-fetch.service mcp-krb-anchor-git.service
     echo "anchor: systemd --user units enabled and started."
 }
 
@@ -205,8 +237,9 @@ install_launchd() {
     LA="$HOME/Library/LaunchAgents"
     mcp="$LA/com.overpassconnect.mcp-krb.anchor-mcp.plist"
     fetch="$LA/com.overpassconnect.mcp-krb.anchor-fetch.plist"
+    gitp="$LA/com.overpassconnect.mcp-krb.anchor-git.plist"
     if [ "$DRY" = 1 ]; then
-        echo "would: write $mcp and $fetch and launchctl bootstrap both"
+        echo "would: write $mcp, $fetch and $gitp and launchctl bootstrap all three"
         return 0
     fi
     mkdir -p "$LA"
@@ -214,7 +247,9 @@ install_launchd() {
         "$PY" "$APPDIR/mcp-krb-bridge.py" --listen "$LSOCK" "$MCP_URL"
     write_plist "com.overpassconnect.mcp-krb.anchor-fetch" "$fetch" \
         "$PY" "$APPDIR/mcp-krb-bridge.py" --fetch-listen "$LFSOCK"
-    for _f in "$mcp" "$fetch"; do
+    write_plist "com.overpassconnect.mcp-krb.anchor-git" "$gitp" \
+        "$PY" "$APPDIR/mcp-krb-bridge.py" --git-listen "$LGSOCK"
+    for _f in "$mcp" "$fetch" "$gitp"; do
         launchctl bootout "gui/$(id -u)/$(basename "$_f" .plist)" 2>/dev/null || true
         launchctl bootstrap "gui/$(id -u)" "$_f"
     done
@@ -243,6 +278,7 @@ strip_ssh_block                       # drop a previous block, then re-add
     printf 'Host *.%s\n' "$DOMAIN"
     printf '    RemoteForward %s %s\n' "$RSOCK"  "$LSOCK"
     printf '    RemoteForward %s %s\n' "$RFSOCK" "$LFSOCK"
+    printf '    RemoteForward %s %s\n' "$RGSOCK" "$LGSOCK"
     printf '%s\n' "$END"
 } >> "$SSHCFG"
 chmod 600 "$SSHCFG"

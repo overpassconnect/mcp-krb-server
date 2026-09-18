@@ -574,6 +574,254 @@ def _pump(read, write, done):
             pass
 
 
+# --- git over the socket ----------------------------------------------------
+#
+# git cannot open a Unix socket and cannot mint a Negotiate header on a host that
+# holds no ticket. What it can do is use an HTTP proxy: with http.proxy pointed
+# at a loopback port, every request for an http:// remote arrives here in
+# absolute-URI form, with the target host in the request line. So this end is a
+# small authenticating proxy. It takes each request git makes, upgrades the
+# scheme to https, adds a fresh Negotiate header minted from this workstation's
+# ticket, forwards it to the real host, and streams the answer back. Clone,
+# fetch and push are all GET and POST to git, so all three work, and git itself
+# is untouched.
+#
+# The remote stays http:// on purpose. An https:// remote makes libcurl ask the
+# proxy for a CONNECT tunnel, and nothing can be added inside a tunnel, so that
+# is refused with an explanation rather than half-working. The cleartext leg is
+# loopback into a Unix socket into an ssh channel; the wire to the real host is
+# https from here.
+#
+# Every rule lives HERE, on the machine holding the ticket, for the same reason
+# --fetch's do: the far end of a forwarded socket is exactly who the rules exist
+# to constrain. The host must be in the realm, the upstream is always https,
+# redirects are never followed, CONNECT is never honoured.
+
+_HOP_BY_HOP = frozenset(('connection', 'keep-alive', 'proxy-connection',
+                         'proxy-authorization', 'proxy-authenticate', 'te',
+                         'trailer', 'upgrade'))
+
+
+class _HttpReader:
+    """Buffered reader over the accepted socket: header lines, then exact byte
+    counts for a body. git reuses one connection for several requests, so the
+    buffer has to survive across them."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.buf = bytearray()
+
+    def line(self, limit=65536):
+        while b'\r\n' not in self.buf:
+            if len(self.buf) > limit:
+                raise ValueError('header line too long')
+            chunk = self.conn.recv(65536)
+            if not chunk:
+                return None
+            self.buf.extend(chunk)
+        i = self.buf.index(b'\r\n')
+        out = bytes(self.buf[:i])
+        del self.buf[:i + 2]
+        return out
+
+    def exactly(self, n):
+        while len(self.buf) < n:
+            chunk = self.conn.recv(65536)
+            if not chunk:
+                raise ValueError('client closed mid-body')
+            self.buf.extend(chunk)
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+
+def _git_read_head(rd):
+    """Request line and headers. None at a clean EOF between requests."""
+    line = rd.line()
+    while line == b'':                  # a stray CRLF between keep-alive requests
+        line = rd.line()
+    if line is None:
+        return None
+    parts = line.decode('latin-1').split(' ')
+    if len(parts) != 3:
+        raise ValueError('malformed request line')
+    method, target, _version = parts
+    headers = []
+    while True:
+        h = rd.line()
+        if h is None:
+            raise ValueError('client closed inside the headers')
+        if h == b'':
+            break
+        k, _, v = h.decode('latin-1').partition(':')
+        headers.append((k.strip(), v.strip()))
+    return method, target, headers
+
+
+def _git_body(rd, hdr):
+    """The request body exactly as git framed it, as an iterator of chunks, plus
+    its length when the framing declares one (None when chunked)."""
+    if 'chunked' in hdr.get('transfer-encoding', '').lower():
+        def dechunk():
+            while True:
+                size = rd.line()
+                if size is None:
+                    raise ValueError('client closed inside a chunk size')
+                n = int(size.split(b';')[0].strip() or b'0', 16)
+                if n == 0:
+                    while True:                       # optional trailers
+                        t = rd.line()
+                        if t is None or t == b'':
+                            return
+                yield rd.exactly(n)
+                rd.exactly(2)                         # the CRLF after the chunk
+        return dechunk(), None
+    n = int(hdr.get('content-length', '0') or 0)
+
+    def by_length():
+        left = n
+        while left > 0:
+            piece = rd.exactly(min(left, 65536))
+            left -= len(piece)
+            yield piece
+    return by_length(), n
+
+
+def _git_reply(conn, status, reason, text):
+    body = (text + '\n').encode('utf-8')
+    conn.sendall(('HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n'
+                  'Connection: close\r\n\r\n' % (status, reason, len(body))).encode('latin-1')
+                 + body)
+
+
+def _git_target(method, target, hdr):
+    """(host, port, path) for the request, from the absolute-URI a proxy is given
+    or, if a remote was pointed straight at the port, from the Host header."""
+    if target.startswith('http://') or target.startswith('https://'):
+        u = urlsplit(target)
+        path = (u.path or '/') + ('?' + u.query if u.query else '')
+        return u.hostname, u.port, path
+    host = hdr.get('host', '').split(':')[0]
+    return host, None, target
+
+
+def _git_forward_one(rd, conn, cafile, host_suffix):
+    """Serve one request from git. Returns False when the connection is done."""
+    head = _git_read_head(rd)
+    if head is None:
+        return False
+    method, target, headers = head
+    hdr = {k.lower(): v for k, v in headers}
+
+    if method == 'CONNECT':
+        _git_reply(conn, 405, 'Method Not Allowed',
+                   'krb-git proxies http:// remotes only. An https:// remote makes git ask '
+                   'for a tunnel, and no ticket can be added inside one. krb-git maps a '
+                   'realm host\'s https:// to http:// for you; if you see this, the remote '
+                   'host is outside the realm or krb-git was bypassed.')
+        return False
+
+    host, port, path = _git_target(method, target, hdr)
+    if not host:
+        _git_reply(conn, 400, 'Bad Request', 'no target host in the request')
+        return False
+    try:
+        _check_url('https://%s%s' % (host, path), host_suffix)     # realm-only, https
+    except FetchRefused as exc:
+        log('git: refused %s %s: %s' % (method, host, exc))
+        _git_reply(conn, 403, 'Forbidden', str(exc))
+        return False
+
+    # git sends Expect: 100-continue ahead of a large POST and waits for it.
+    if hdr.get('expect', '').lower() == '100-continue':
+        conn.sendall(b'HTTP/1.1 100 Continue\r\n\r\n')
+
+    body, length = _git_body(rd, hdr)
+    up_headers = {}
+    for k, v in headers:
+        kl = k.lower()
+        # Framing is re-derived, Host is rewritten, and any Authorization git
+        # was given is discarded: the ticket here is the only credential.
+        if kl in _HOP_BY_HOP or kl in ('host', 'expect', 'authorization',
+                                       'content-length', 'transfer-encoding'):
+            continue
+        up_headers[k] = v
+    up_headers['Host'] = host if not port else '%s:%d' % (host, port)
+    if length is not None:
+        up_headers['Content-Length'] = str(length)
+    auth = negotiate_header(host)
+    if auth:
+        up_headers['Authorization'] = auth
+
+    ctx = ssl.create_default_context(cafile=cafile)
+    up = http.client.HTTPSConnection(host, port or 443, context=ctx, timeout=600)
+    try:
+        if method in ('POST', 'PUT', 'PATCH'):
+            payload = body
+        else:
+            for _ in body:                # keep the stream aligned
+                pass
+            payload = None
+        # An iterable body with Content-Length is sent as-is; without one,
+        # http.client chunks it, which is exactly the framing git used.
+        up.request(method, path, body=payload, headers=up_headers)
+        resp = up.getresponse()
+        if 300 <= resp.status < 400:
+            log('git: refusing to follow a %d redirect from %s' % (resp.status, host))
+            _git_reply(conn, 502, 'Bad Gateway',
+                       'the host redirected (%d); the proxy never follows one' % resp.status)
+            return False
+        log('git: %s %s%s -> %d' % (method, host, path.split('?', 1)[0], resp.status))
+
+        # http.client has already undone the upstream framing, so the reply is
+        # re-framed here: by length when the host declared one, chunked otherwise.
+        # WWW-Authenticate is dropped so a 401 reads as final to git rather than
+        # an invitation to try credentials it does not have.
+        clen = None
+        out = ['HTTP/1.1 %d %s' % (resp.status, resp.reason)]
+        for k, v in resp.getheaders():
+            kl = k.lower()
+            if kl == 'content-length':
+                clen = v
+                continue
+            if kl in _HOP_BY_HOP or kl in ('transfer-encoding', 'www-authenticate'):
+                continue
+            out.append('%s: %s' % (k, v))
+        out.append('Content-Length: %s' % clen if clen is not None
+                   else 'Transfer-Encoding: chunked')
+        out.append('Connection: keep-alive')
+        conn.sendall(('\r\n'.join(out) + '\r\n\r\n').encode('latin-1'))
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            conn.sendall(chunk if clen is not None
+                         else b'%x\r\n' % len(chunk) + chunk + b'\r\n')
+        if clen is None:
+            conn.sendall(b'0\r\n\r\n')
+    finally:
+        up.close()
+    return hdr.get('connection', '').lower() != 'close'
+
+
+def serve_git_socket(path, cafile=None, host_suffix=None):
+    """Each connection is one git session: requests are served in order on it
+    until git closes, as any HTTP/1.1 proxy would."""
+    def handle(conn):
+        rd = _HttpReader(conn)
+        try:
+            while _git_forward_one(rd, conn, cafile, host_suffix):
+                pass
+        except Exception as exc:
+            log('git: connection ended: %s' % exc)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+    _serve(path, handle)
+
+
 def serve_mcp_socket(path, url, cafile=None):
     """Each connection gets its own bridge process, exactly as if it had been
     spawned on stdio. The remote end just moves bytes."""
@@ -686,6 +934,9 @@ def main():
                              'forwarding with ssh -R')
     parser.add_argument('--fetch-listen', metavar='SOCKET', default=None,
                         help='serve --fetch requests over a 0600 Unix socket')
+    parser.add_argument('--git-listen', metavar='SOCKET', default=None,
+                        help='serve git over a 0600 Unix socket, as an authenticating '
+                             'HTTP proxy for a host that holds no ticket (krb-git)')
     opts = parser.parse_args()
 
     host_suffix = opts.allow_host_suffix or _realm_suffix()
@@ -730,8 +981,16 @@ def main():
                            host_suffix=host_suffix, max_bytes=opts.max_bytes)
         return
 
+    if opts.git_listen:
+        try:
+            check_credentials()
+        except Exception as exc:
+            log('no usable Kerberos credentials: %s' % exc); sys.exit(2)
+        serve_git_socket(opts.git_listen, cafile=opts.ca, host_suffix=host_suffix)
+        return
+
     if not opts.url:
-        parser.error('a URL is required unless --fetch or --fetch-listen is used')
+        parser.error('a URL is required unless --fetch, --fetch-listen or --git-listen is used')
 
     if opts.listen:
         try:

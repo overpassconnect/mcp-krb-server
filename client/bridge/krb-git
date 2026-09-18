@@ -1,0 +1,186 @@
+#!/bin/sh
+# krb-git - git over Kerberos from a host that holds no ticket.
+#
+# The sibling of mcp-fetch, and the same command works in two places:
+#
+#   on a workstation    git speaks Negotiate itself; this just turns it on
+#   on a shared host    there is no ticket, so git's HTTP to a realm host is
+#                       relayed through the socket that `ssh -R` forwarded, and
+#                       the workstation adds the Negotiate header to every
+#                       request over there
+#
+# Which of the two is picked is decided by whether that socket is present, so
+# nobody has to remember what kind of machine they are on. Nothing is stored:
+# no token, no key, no ticket on the shared host. Clone, fetch, pull and push
+# all work, because to git they are all GET and POST.
+#
+# On a shared host git is given a loopback proxy, for realm hosts only. The
+# realm hosts this command will talk to are read from its URL arguments and
+# from the remotes of the repository it acts on, and each one gets two settings
+# for this one invocation: its https:// URL is mapped to http:// (a proxy can
+# add a header to a request, never to a tunnel), and that http:// URL is routed
+# to the proxy. Every other host is left exactly as git would treat it, and a
+# command that touches no realm host runs as plain git. The stored remote is
+# never rewritten, so it stays the normal https:// URL, and a plain `git pull`
+# without krb-git fails cleanly on a 401 rather than leaking anything.
+#
+# The loopback port is checked against the kernel's TCP table for every
+# connection, so another user on the same host is refused; the Unix socket's
+# 0600 guarantee is kept, only carried over one more hop.
+#
+#   krb-git clone https://git.example.internal/org/repo.git
+#   krb-git pull
+#   krb-git push
+#
+# Every restriction on what may be reached is enforced on the workstation: the
+# host must be in the realm, the upstream is always https, redirects are never
+# followed. A caller on a shared host is exactly who those rules exist to
+# constrain, so a copy of them here would be worth nothing.
+set -u
+
+SOCKET="${MCP_KRB_GIT_SOCKET:-/run/user/$(id -u)/mcp-krb-git.sock}"
+
+# MCP_KRB_HOME is an override, so it is obeyed exactly: pointing it somewhere
+# empty is an error, not a reason to quietly use the system install.
+if [ -n "${MCP_KRB_HOME:-}" ]; then
+    APPDIR="$MCP_KRB_HOME"
+    if [ ! -f "$APPDIR/mcp-krb-bridge.py" ] && [ ! -f "$APPDIR/mcp-krb-remote-bridge.py" ]; then
+        echo "krb-git: MCP_KRB_HOME=$APPDIR holds no bridge." >&2
+        exit 2
+    fi
+else
+    APPDIR=""
+    for _d in /opt/mcp-krb "$HOME/Library/Application Support/mcp-krb"; do
+        if [ -f "$_d/mcp-krb-bridge.py" ] || [ -f "$_d/mcp-krb-remote-bridge.py" ]; then
+            APPDIR="$_d"
+            break
+        fi
+    done
+    if [ -z "$APPDIR" ]; then
+        echo "krb-git: no bridge installed. Looked in /opt/mcp-krb and" >&2
+        echo "  \$HOME/Library/Application Support/mcp-krb. Set MCP_KRB_HOME to" >&2
+        echo "  point at another directory." >&2
+        exit 2
+    fi
+fi
+
+if [ -x "$APPDIR/venv/bin/python3" ]; then
+    PY="$APPDIR/venv/bin/python3"
+else
+    PY=python3
+fi
+
+# The realm, lowercased, as a domain suffix: the hosts routed through the
+# anchor. Read from the same file Kerberos itself reads, honouring KRB5_CONFIG
+# the way the libraries do (a list, the first entry wins).
+realm_suffix() {
+    _cfg="${KRB5_CONFIG:-/etc/krb5.conf}"
+    _cfg="${_cfg%%:*}"
+    sed -n 's/^[[:space:]]*default_realm[[:space:]]*=[[:space:]]*//p' "$_cfg" 2>/dev/null \
+        | head -1 | tr -d '[:space:]' | tr 'A-Z' 'a-z'
+}
+
+# The host of an http(s) URL, without any user@ in front of it. Anything else
+# (ssh, scp-like, a local path) prints nothing.
+url_host() {
+    case "$1" in
+        https://*|http://*) printf '%s\n' "$1" | sed -E 's#^https?://([^/@]*@)?([^/:]+).*#\2#' ;;
+    esac
+}
+
+# The realm hosts this invocation talks to, one per line, deduplicated: from
+# URL arguments (a clone, or an explicit fetch URL) and from the remotes and
+# submodules of the repository the command acts on. git's own leading options
+# are honoured, so `-C dir`, `--git-dir` and `--work-tree` point this lookup at
+# the same repository they point git at. The lookup runs in a subshell, so the
+# positional parameters can be cut down to those options without touching the
+# caller's.
+realm_hosts() {
+    sfx="$1"; shift
+    (
+        for a in "$@"; do
+            url_host "$a"
+        done
+        # Count git's leading options. The ones that take a separate value are
+        # listed, so that value is not mistaken for the subcommand.
+        total=$#; lead=0; value=0
+        for a in "$@"; do
+            if [ "$value" = 1 ]; then value=0; lead=$((lead + 1)); continue; fi
+            case "$a" in
+                -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--attr-source)
+                    value=1; lead=$((lead + 1)) ;;
+                -*) lead=$((lead + 1)) ;;
+                *)  break ;;
+            esac
+        done
+        # Keep only those: rotate the first $lead parameters to the back while
+        # shifting every original one off the front.
+        i=0
+        while [ "$i" -lt "$total" ]; do
+            [ "$i" -lt "$lead" ] && set -- "$@" "$1"
+            shift; i=$((i + 1))
+        done
+        git "$@" config --get-regexp '^remote\..*\.(push)?url$' 2>/dev/null \
+            | while read -r _key url; do url_host "$url"; done
+        top=$(git "$@" rev-parse --show-toplevel 2>/dev/null) || top=""
+        if [ -n "$top" ] && [ -f "$top/.gitmodules" ]; then
+            git config -f "$top/.gitmodules" --get-regexp '^submodule\..*\.url$' 2>/dev/null \
+                | while read -r _key url; do url_host "$url"; done
+        fi
+    ) | tr 'A-Z' 'a-z' | while read -r h; do
+        case "$h" in *."$sfx"|"$sfx") [ -n "$sfx" ] && printf '%s\n' "$h" ;; esac
+    done | sort -u
+}
+
+if [ -S "$SOCKET" ]; then
+    # Shared host: relay git's traffic to realm hosts through the anchor. A
+    # command that involves none runs as plain git, forwarder and all untouched.
+    sfx=$(realm_suffix)
+    hosts=$(realm_hosts "$sfx" "$@")
+    [ -n "$hosts" ] || exec git "$@"
+
+    portfile=$(mktemp) || exit 2
+    "$PY" "$APPDIR/mcp-krb-remote-bridge.py" --git-forward "$SOCKET" > "$portfile" &
+    fwd=$!
+    # The forwarder prints its port as soon as it is bound; wait for that line.
+    i=0
+    while [ ! -s "$portfile" ] && [ "$i" -lt 100 ]; do
+        sleep 0.05 2>/dev/null || sleep 1
+        i=$((i + 1))
+        kill -0 "$fwd" 2>/dev/null || break
+    done
+    port=$(head -1 "$portfile" 2>/dev/null)
+    rm -f "$portfile"
+    if [ -z "$port" ]; then
+        echo "krb-git: the loopback forwarder did not start (is $SOCKET live?)" >&2
+        kill "$fwd" 2>/dev/null
+        exit 2
+    fi
+
+    # Per host, for this invocation only: https:// becomes http://, and that
+    # http:// goes to the proxy. Hostnames carry no spaces, so the word split
+    # is safe.
+    for host in $hosts; do
+        set -- -c "url.http://$host/.insteadOf=https://$host/" \
+               -c "http.http://$host/.proxy=http://127.0.0.1:$port" "$@"
+    done
+    git "$@"
+    rc=$?
+    kill "$fwd" 2>/dev/null
+    wait "$fwd" 2>/dev/null
+    exit $rc
+fi
+
+if [ -f "$APPDIR/mcp-krb-bridge.py" ]; then
+    # Workstation with a ticket: git negotiates itself. emptyAuth lets it try
+    # Negotiate before it has any username to offer.
+    exec git -c http.emptyAuth=true "$@"
+fi
+
+echo "krb-git: this host holds no ticket-capable bridge, and there is no" >&2
+echo "  forwarded socket at $SOCKET" >&2
+echo "" >&2
+echo "  That socket is created by your own ssh -R and exists only while that" >&2
+echo "  session is open. Reconnect with the forward in place; see" >&2
+echo "  client/README.md, 'Using it from a shared host'." >&2
+exit 2

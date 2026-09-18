@@ -491,6 +491,21 @@ The refusal is a KDC `KDC_ERR_BADOPTION`, reported by the server as
 `kdc-badoption:check-rule-target-and-caller-forwardable`, which names both
 suspects because it cannot tell them apart.
 
+The git relay (`--git-listen`, used by `krb-git` from a host with no ticket)
+keeps the same posture with one more surface, because it is an HTTP proxy that
+git talks to. Every request git makes to it is re-issued from the workstation
+over `https` to a host inside the realm suffix, with a fresh `Negotiate`
+header; anything else is answered with a refusal before a connection is opened:
+a `CONNECT` (nothing can be added inside a tunnel, so an `https://` remote is
+mapped to `http://` on the shared host for the one invocation instead), a host
+outside the suffix, and any 3xx from the host. An `Authorization` header git
+was given is discarded rather than forwarded, and `WWW-Authenticate` is
+stripped from replies so a 401 is final to git rather than a prompt. On the
+shared host the port git is pointed at is loopback, and the forwarder behind
+it refuses any connection whose uid, read from the kernel's TCP table, is not
+its own, so the port carries the socket's `0600` across the one hop TCP adds.
+`test_krb_git.py` covers each refusal.
+
 ---
 
 ## Threat model: a malicious or tampered client
@@ -911,6 +926,13 @@ suite runs anywhere with just `python3` (Windows, Linux, CI), no KDC.
 - `test_mcp_krb_bridge.py` - the client (`client/bridge/mcp-krb-bridge.py`): the
   stdio↔HTTP framing, a fresh token per call, session/protocol header handling,
   and the [CL1] refusals (plaintext `http://` to a non-local host, no delegation).
+- `test_krb_git.py` - git from a host with no ticket: the authenticating proxy
+  (`--git-listen`) request by request with the upstream faked, covering the
+  realm suffix, the https upgrade, CONNECT and redirect refusals, the dropped
+  client `Authorization`, re-framing and keep-alive; the loopback forwarder's
+  uid check; and the `krb-git` wrapper against a fake proxy, so what git was
+  told can be read back (realm hosts mapped and routed, everything else left
+  to git, the stored remote untouched). [CL1]
 - `test_spnego_asgi.py` - the ASGI middleware (`server/spnego_asgi.py`) that puts
   the acceptor in front of the app: 401 + `WWW-Authenticate: Negotiate` on no
   credentials, NTLM and incomplete-context rejection, principal onto the scope.

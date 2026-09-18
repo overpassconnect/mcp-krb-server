@@ -300,7 +300,7 @@ iwr -useb "$base/setup.ps1" -OutFile setup.ps1
     <code>known_hosts</code> are left untouched: the script adds <code>wslssh</code> rather than
     hijacking <code>ssh</code>.</p>
 
-    <p class="note"><strong>What you get in PowerShell.</strong> Six functions are added to your
+    <p class="note"><strong>What you get in PowerShell.</strong> Seven functions are added to your
     profile. Everything Kerberos happens inside WSL, because that is where the ticket lives, and
     these save you spelling that out every time. Your own <code>ssh</code> and <code>git</code>
     are untouched.</p>
@@ -311,6 +311,7 @@ wslkdestroy       # drop it
 
 wslssh host.__DOMAIN__                  # SSH, no password
 wslgit clone https://git.__DOMAIN__/... # git over the realm
+krb-git pull                            # the same, under the name that also works on a shared host
 mcp-fetch &lt;url&gt; -o C:\path\file        # fetch from a Kerberized service</code></pre>
 
     <p class="note"><code>wslkinit</code> with no arguments uses your own principal in

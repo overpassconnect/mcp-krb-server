@@ -145,9 +145,10 @@ path_is_ours() {
         "$APPROOT"|"$APPROOT"/*) return 0 ;;
         /etc/claude-code|/etc/claude-code/*) return 0 ;;
         "$MANAGED_FILE") return 0 ;;
-        # The mcp-fetch symlink, and only when the installer recorded creating
-        # it: an mcp-fetch that was already there is somebody else's.
+        # The mcp-fetch and krb-git symlinks, and only when the installer
+        # recorded creating them: one that was already there is somebody else's.
         /usr/local/bin/mcp-fetch) return 0 ;;
+        /usr/local/bin/krb-git) return 0 ;;
         # Firefox-in-WSL: the Mozilla repo, its pin and keyring, and the policy
         # file. Each is only ever removed when the manifest says this kit created
         # it, so a machine that already had the repo keeps it.

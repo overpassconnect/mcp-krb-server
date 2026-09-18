@@ -15,7 +15,7 @@ inert, and that is the point.
     mcp-krb-bridge.py --listen S   <-- ssh -R -->   this file
        holds the ticket                            moves bytes
 
-Two modes, matching the two sockets the workstation serves:
+Three modes, matching the three sockets the workstation serves:
 
     mcp-krb-remote-bridge.py SOCKET
         Join stdin/stdout to SOCKET. This is what an MCP client spawns; it sees
@@ -31,6 +31,15 @@ Two modes, matching the two sockets the workstation serves:
         Where the file lands is the other way round. That is decided here,
         because the file is written here, so the destination checks are a real
         copy of the workstation's rather than a deferral to them.
+
+    mcp-krb-remote-bridge.py --git-forward SOCKET
+        Bind a loopback port and relay it to SOCKET, where the workstation runs
+        an authenticating HTTP proxy for git. git cannot open a Unix socket, so
+        krb-git starts this, points git's http.proxy at the port it prints, and
+        stops it when git is done. Every connection to the port is checked
+        against the kernel's TCP table and refused unless it comes from this
+        uid, which is what keeps the socket's 0600 meaning across the one hop
+        a TCP port adds.
 
 A socket is not a credential. It cannot be copied off this machine or replayed
 tomorrow, and it stops existing when the SSH session ends. What it does grant,
@@ -217,6 +226,83 @@ def fetch(path, url, dest, sha256=None, force=False, allow_outside=False,
         s.close()
 
 
+def _tcp_peer_uid(port):
+    """The uid that owns the loopback TCP socket bound to 127.0.0.1:port, read
+    from the kernel's own table. None if it cannot be found, which is refused."""
+    v4 = '0100007F:%04X' % port
+    v6 = '0000000000000000FFFF00000100007F:%04X' % port     # ::ffff:127.0.0.1
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            with open(table, encoding='ascii') as fh:
+                next(fh)                                    # header row
+                for row in fh:
+                    f = row.split()
+                    if len(f) > 7 and f[1] in (v4, v6):
+                        return int(f[7])
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _relay_pair(tcp, sock_path):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(sock_path)
+    except OSError as exc:
+        log('cannot reach %s: %s' % (sock_path, exc))
+        tcp.close()
+        return
+
+    def pump(src, dst):
+        try:
+            while True:
+                b = src.recv(BUF)
+                if not b:
+                    break
+                dst.sendall(b)
+        except OSError:
+            pass
+        finally:
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    threading.Thread(target=pump, args=(tcp, s), daemon=True).start()
+    pump(s, tcp)
+    for c in (tcp, s):
+        try:
+            c.close()
+        except OSError:
+            pass
+
+
+def git_forward(sock_path, port):
+    """127.0.0.1:port <-> the forwarded git socket, for git's http.proxy.
+
+    git cannot open a Unix socket, so it is given a loopback port instead. A
+    loopback port is reachable by every user on a shared host, which is exactly
+    what the 0600 socket exists to prevent, so every accepted connection is
+    checked against the kernel's TCP table: it records which uid owns the peer
+    end, and anyone else is refused. That restores the socket's guarantee with
+    no credential appearing anywhere. Prints the bound port on one line first;
+    krb-git reads it and tells git."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(('127.0.0.1', port))
+    srv.listen(8)
+    print(srv.getsockname()[1], flush=True)
+    me = os.getuid()
+    while True:
+        conn, (_ip, peer_port) = srv.accept()
+        uid = _tcp_peer_uid(peer_port)
+        if uid != me:
+            log('refused a loopback connection from uid %s' % uid)
+            conn.close()
+            continue
+        threading.Thread(target=_relay_pair, args=(conn, sock_path), daemon=True).start()
+
+
 def main():
     p = argparse.ArgumentParser(
         prog='mcp-krb-remote-bridge',
@@ -235,7 +321,16 @@ def main():
                    help='permit a destination outside the working directory')
     p.add_argument('--max-bytes', type=int, default=None,
                    help='ask the workstation to cap the body below its own limit')
+    p.add_argument('--git-forward', metavar='SOCKET', dest='git_socket',
+                   help='relay a loopback port (uid-checked) to the forwarded git '
+                        'socket, for git http.proxy; prints the port first')
+    p.add_argument('--port', type=int, default=0,
+                   help='loopback port for --git-forward (default: any free one)')
     o = p.parse_args()
+
+    if o.git_socket:
+        git_forward(o.git_socket, o.port)
+        return
 
     for stream in (sys.stdin, sys.stdout):
         if hasattr(stream, 'reconfigure'):

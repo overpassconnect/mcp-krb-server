@@ -107,6 +107,17 @@ class UninstallSh(unittest.TestCase):
         self.assertNotIn('left alone: /usr/local/bin/mcp-fetch', r.stdout)
         self.assertFalse(os.path.exists(self.path('usr/local/bin/mcp-fetch')))
 
+    def test_the_krb_git_link_is_removed_when_the_installer_made_it(self):
+        # Same shape as mcp-fetch: a command on PATH outside the kit tree.
+        m = dict(MANIFEST)
+        m['created'] = MANIFEST['created'] + ['/usr/local/bin/krb-git']
+        self.make_tree(manifest=m)
+        self.put('usr/local/bin/krb-git', '#!/bin/sh')
+        r = self.run_uninstall('--yes')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('left alone: /usr/local/bin/krb-git', r.stdout)
+        self.assertFalse(os.path.exists(self.path('usr/local/bin/krb-git')))
+
     def test_an_mcp_fetch_the_installer_did_not_make_is_left_alone(self):
         # Same path, absent from the manifest: somebody else's, and not ours to
         # delete.

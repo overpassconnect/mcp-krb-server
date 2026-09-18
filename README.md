@@ -58,8 +58,9 @@ has nothing at all. Nothing is copied, forwarded or minted to make a second you.
   ║         │ runs           └───┬────┘                                 │   ║
   ║         ▼                    │ ⑦a --listen                          │   ║
   ║    mcp-fetch ──┐             ▼                                      │   ║
-  ║                │      ~/.mcp-krb.sock  0600                         │   ║
-  ║                └──▶ ~/.mcp-krb-fetch.sock  0600  ⑦b                 │   ║
+  ║    krb-git ────┤      ~/.mcp-krb.sock  0600                         │   ║
+  ║                ├──▶ ~/.mcp-krb-fetch.sock  0600  ⑦b                 │   ║
+  ║                └──▶ ~/.mcp-krb-git.sock  0600  ⑦c                   │   ║
   ║                              ▲                                      │   ║
   ║    ssh ────── ⑤ ─────┐       │                                      │   ║
   ╚══════════╪═══════════╪═══════╪══════════════════════════════════════╪═══╝
@@ -73,16 +74,17 @@ has nothing at all. Nothing is copied, forwarded or minted to make a second you.
   ║ ◀────────┘  ⑤ ssh in         ▼                                      │   ║
   ║                    /run/user/N/mcp-krb.sock        ◀── ⑦a           │   ║
   ║                    /run/user/N/mcp-krb-fetch.sock  ◀── ⑦b           │   ║
+  ║                    /run/user/N/mcp-krb-git.sock    ◀── ⑦c           │   ║
   ║                              ▲            ▲                         │   ║
   ║                       stdio  │            │ asks the workstation    │   ║
-  ║    MCP client ──▶ remote bridge       mcp-fetch                     │   ║
+  ║    MCP client ──▶ remote bridge       mcp-fetch · krb-git           │   ║
   ║         │                                  ▲                        │   ║
   ║         └────────── runs ──────────────────┘                        │   ║
   ║                                                                     │   ║
   ║    has a HOST keytab.  NO user ticket.  nothing here to steal.      │   ║
   ╚═════════════════════════════════════════════════════════════════════╪═══╝
              │                                                          │
-             │ ⑧ fetch a file, byte-exact                               │ ④
+             │ ⑧ fetch a file, byte-exact · clone, pull, push           │ ④
              ▼                                                          ▼
   ┌────────────────────────────────┐        ┌──────────────────────────────┐
   │ any Kerberised service         │        │ the MCP server               │
@@ -154,9 +156,10 @@ without holding your TGT, requires an identity the realm knows and rules it
 enforces. A shell script cannot be granted that, and should not be.
 
 **And the corollary:** things you could already do belong in the shell, not
-behind a tool. `mcp-fetch` is deliberately **not** an MCP tool. The assistant
-already has your ticket, so wrapping an HTTP GET in a server call would add a
-hop, a schema and an audit line while changing nothing about what is possible.
+behind a tool. `mcp-fetch` and `krb-git` are deliberately **not** MCP tools. The
+assistant already has your ticket, so wrapping an HTTP GET or a `git pull` in a
+server call would add a hop, a schema and an audit line while changing nothing
+about what is possible.
 The test each tool should pass is: *could the caller do this themselves, unlogged,
 if the tool did not exist?* When the answer is yes, it does not belong here.
 
@@ -178,6 +181,11 @@ lifetime, still valid after you log out.
 It is structurally `ssh-agent` forwarding, with a narrower grant: agent forwarding
 gives SSH-to-anywhere, these give one service and one allowlist. The operational
 rule that follows is to avoid mixing privilege levels and sudo on one host.
+
+`krb-git` adds one hop to this picture, a loopback port, because git cannot open
+a Unix socket. A port is reachable by every user on the host, so the forwarder
+behind it checks the uid of each connection against the kernel's TCP table and
+refuses anyone else. The port grants nothing the socket did not.
 
 ## What it looks like
 
@@ -630,6 +638,7 @@ client/          # everything that runs on a workstation
     mcp-krb-bridge.py  - the bridge itself (stdlib + python3-gssapi)
     mcp-krb-remote-bridge.py - the inert half, for a host that holds no ticket
     mcp-fetch          - fetch one URL byte-exact, over whichever of the two applies
+    krb-git            - git through the same choice: Negotiate itself on a workstation, relayed on a shared host
     examples/          - mcp.json, mcp.json.windows, managed-mcp.json
 tests/           # hermetic unit tests (fake gssapi, no KDC needed)
   run-tests.sh, python/

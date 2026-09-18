@@ -869,7 +869,7 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|krb-git|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
 # Same reasoning as wslssh, one addition: git is directory-sensitive where ssh is
 # not, so this carries --cd. $PWD is the Windows working directory and wsl.exe
@@ -893,6 +893,12 @@ $kept += "function wslgit { wsl.exe --cd `"`$PWD`" -e git @args }   # Kerberos g
 # One line, because the profile is kept idempotent by matching whole `function`
 # lines and a multi-line definition would leave orphans behind on re-run.
 $kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e mcp-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
+# krb-git is the git command a shared host has, where there is no ticket and
+# git's HTTP is relayed back to this workstation. On the workstation itself it
+# is git with Negotiate switched on, which is what wslgit already is; it exists
+# here so that the one name learned on a shared host also works at home, and
+# carries --cd for the same reason wslgit does.
+$kept += "function krb-git { wsl.exe --cd `"`$PWD`" -e krb-git @args }   # Kerberos krb-git via WSL (setup.ps1)"
 # The three ticket verbs. Everything above is a consumer of a ticket; these are
 # how you get one, look at it and drop it, so they are the commands actually
 # typed daily and the ones worth not typing in full.
@@ -904,15 +910,21 @@ $kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i+
 # realm removes the chance. Arguments still pass through, so `wslkinit -R`
 # renews and `wslkinit someone-else@REALM` works.
 #
+# After a ticket, the reverse-bridge anchor is (re)checked. install-anchor.sh
+# decides for itself whether anything is missing and is silent when nothing is,
+# so it is called every time rather than behind a guard here: a guard on one
+# unit name is exactly what left anchors a listener short when a third socket
+# was added.
+#
 # There is no Windows equivalent to fall back on: this estate holds no tickets
 # outside WSL, so unlike ssh and git there is no native `kinit` these could
 # shadow. Naming them wsl* anyway keeps one rule for the whole set rather than
 # an exception to remember.
-$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm }; if (`$?) { wsl.exe -e sh -c 'systemctl --user is-active mcp-krb-anchor-mcp.service >/dev/null 2>&1 || { [ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url $McpBase/ --domain $Domain --ipa-url https://$Kdc; }' } }   # Kerberos kinit + reverse-bridge anchor via WSL (setup.ps1)"
+$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm }; if (`$?) { wsl.exe -e sh -c '[ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url $McpBase/ --domain $Domain --ipa-url https://$Kdc' } }   # Kerberos kinit via WSL (setup.ps1)"
 $kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
 $kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh, wslgit, mcp-fetch, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
+Say 'PowerShell: wslssh, wslgit, mcp-fetch, krb-git, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
 
 # Windows git defaults to core.autocrlf=true and WSL git to false. With the
 # checkout on the Windows filesystem BOTH act on one worktree, so each sees files

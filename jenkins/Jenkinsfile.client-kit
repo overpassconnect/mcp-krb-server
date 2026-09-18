@@ -10,7 +10,7 @@
 //   YES  the download artifacts under join:/var/www/join/d  -- the installers
 //        (setup.sh/.ps1/setup-macos.sh, install-bridge.sh, install-anchor.sh,
 //        uninstall.*, JsoncEdit.ps1) and the bridge (mcp-krb-bridge.py,
-//        mcp-krb-remote-bridge.py, mcp-fetch, mcp-krb). run.sh copies these
+//        mcp-krb-remote-bridge.py, mcp-fetch, krb-git, mcp-krb). run.sh copies these
 //        VERBATIM -- no templating -- so shipping them straight from the
 //        checkout is byte-identical to a run.sh export, without needing a
 //        site.env secret on the agent.
@@ -89,11 +89,11 @@ SSH="ssh -i $DKEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 RSYNC_RSH="$SSH" rsync -rlt --delete --chmod=F644 .deploy/ "$JOIN":
 echo "--- verifying served bytes match what we shipped ---"
 fail=0
-for f in mcp-krb install-anchor.sh install-bridge.sh; do
+for f in mcp-krb krb-git install-anchor.sh install-bridge.sh; do
     code=$(curl -sS -o "/tmp/v_$f" --cacert /etc/ipa/ca.crt \
         -w '%{http_code}' "https://$HOSTNAME_ONLY/d/$f" || echo 000)
     if [ "$code" != 200 ]; then echo "  $f: HTTP $code"; fail=1; continue; fi
-    src="client/$f"; [ "$f" = mcp-krb ] && src="client/bridge/mcp-krb"
+    src="client/$f"; [ -f "client/bridge/$f" ] && src="client/bridge/$f"
     if cmp -s "$src" "/tmp/v_$f"; then echo "  $f: HTTP 200, matches checkout"; else
         echo "  $f: HTTP 200 but SERVED BYTES DIFFER from checkout"; fail=1; fi
 done

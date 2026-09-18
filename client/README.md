@@ -19,6 +19,7 @@ anywhere.
 | `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
 | `mcp-krb-remote-bridge.py` | the half that holds nothing, for a host with no ticket | `install-bridge.sh` |
 | `mcp-fetch` | fetch one URL byte-exact; picks between the two above | `install-bridge.sh` |
+| `krb-git` | git over Kerberos, through the same choice: git's own Negotiate on a workstation, relayed on a shared host | `install-bridge.sh` |
 
 ### The MCP host serves them
 
@@ -1082,16 +1083,60 @@ WSL. It translates an absolute `-o C:\...` with `wslpath -u` before handing it
 over; relative paths need no help, since `wsl.exe` inherits the working
 directory.
 
-### Using it from a shared host
+## Git: `krb-git`
+
+`git clone`, `pull` and `push` against a Kerberized forge need no help on a
+workstation: git speaks Negotiate itself once `http.emptyAuth` is on. On a
+shared host there is no ticket to negotiate with, and putting one there is what
+this whole kit exists to avoid. `krb-git` is `git` with that solved, and it is
+the same command in both places:
+
+```
+krb-git clone https://git.example.internal/org/repo.git
+krb-git pull
+krb-git push
+```
+
+On a workstation it runs `git -c http.emptyAuth=true` and nothing more. On a
+shared host it starts a loopback port relayed to the git socket your `ssh -R`
+forwarded, and for this one invocation tells git two things about each realm
+host involved: that its `https://` URL is `http://` (a proxy can add a header to
+a request, never to a tunnel), and that this `http://` goes to the port. The
+workstation end is an authenticating HTTP proxy. It takes each request, upgrades
+it back to `https`, adds a fresh `Negotiate` header from your ticket and streams
+the answer back. Clone, fetch and push are all GET and POST to git, so all of
+them work, and git itself is untouched.
+
+Which hosts count as involved is read from the command's URL arguments and from
+the remotes and submodules of the repository it acts on, `-C` and `--git-dir`
+included. Everything else is left exactly as git would treat it: a GitHub remote
+in the same repository goes direct, and `krb-git status` is plain `git status`.
+The stored remote is never rewritten, so it stays the normal `https://` URL, and
+a plain `git pull` without `krb-git` fails on the 401 rather than leaking
+anything.
+
+The rules are the ones `mcp-fetch` has, enforced on the workstation: the host
+must be in the realm, the upstream is always `https`, redirects are never
+followed, a CONNECT is refused, and any `Authorization` git was given is
+dropped in favour of the ticket. The loopback port is the one hop the socket's
+`0600` does not cover, so the forwarder checks the uid behind every connection
+to it against the kernel's TCP table and refuses anyone else.
+
+On Windows `krb-git` is a PowerShell function that runs it inside WSL, like
+`wslgit`. It exists there so the one name learned on a shared host also works at
+home.
+
+### Using them from a shared host
 
 The workstation installers set this up for you. After your first `kinit`,
 `install-anchor.sh` runs (from a `kinit` hook the installer adds on every OS:
 `wslkinit` on Windows, a `kinit` shell-rc wrapper on Linux and macOS): it serves
-the two sockets from a
-`systemd --user` service or a launchd agent, reads your realm uid from IPA to
-fill in the `RemoteForward` paths, and adds them to `~/.ssh/config`. A plain
-`ssh` to a `*.<domain>` host then forwards them with nothing on the command
-line, which is what VS Code Remote-SSH does. `install-anchor.sh --uninstall`
+the three sockets from `systemd --user` services or launchd agents, reads your
+realm uid from IPA to fill in the `RemoteForward` paths, and adds them to
+`~/.ssh/config`. A plain `ssh` to a `*.<domain>` host then forwards them with
+nothing on the command line, which is what VS Code Remote-SSH does. It checks
+all three on every `kinit`, so an anchor set up before one of them existed is
+completed rather than left a socket short. `install-anchor.sh --uninstall`
 reverses it. The rest of this section is what that automates, done by hand.
 
 A shared dev host holds a *machine* keytab and no user ticket, by design:
@@ -1099,27 +1144,29 @@ A shared dev host holds a *machine* keytab and no user ticket, by design:
 there. That leaves it unable to fetch anything as you, which is the point.
 
 The answer is to forward the socket rather than the credential. On the
-workstation, serve the two things a remote client needs:
+workstation, serve the three things a remote client needs:
 
 ```
 mcp-krb-bridge.py --listen ~/.mcp-krb.sock https://mcp.example.internal/ &
 mcp-krb-bridge.py --fetch-listen ~/.mcp-krb-fetch.sock &
+mcp-krb-bridge.py --git-listen ~/.mcp-krb-git.sock &
 ```
 
-Then forward both, which `~/.ssh/config` can do for you:
+Then forward all three, which `~/.ssh/config` can do for you:
 
 ```
 Host dev.example.internal
     RemoteForward /run/user/1000/mcp-krb.sock       /home/you/.mcp-krb.sock
     RemoteForward /run/user/1000/mcp-krb-fetch.sock /home/you/.mcp-krb-fetch.sock
+    RemoteForward /run/user/1000/mcp-krb-git.sock   /home/you/.mcp-krb-git.sock
 ```
 
 `RemoteForward` has taken Unix socket paths since OpenSSH 6.7. Use your own uid
 on the remote (`id -u`) in the left-hand paths; `~` is not expanded on that
-side. On the far end, `mcp-fetch` notices the socket and asks the workstation
-instead of trying to do it itself, and an MCP client is pointed at
-`mcp-krb-remote-bridge.py /run/user/1000/mcp-krb.sock`, which joins its stdio
-to the socket and holds nothing.
+side. On the far end, `mcp-fetch` and `krb-git` notice their sockets and ask
+the workstation instead of trying to do it themselves, and an MCP client is
+pointed at `mcp-krb-remote-bridge.py /run/user/1000/mcp-krb.sock`, which joins
+its stdio to the socket and holds nothing.
 
 **Set `StreamLocalBindUnlink yes` in the remote's `sshd_config`.** The default
 is `no`, which leaves the socket file behind when a session ends, and the next
@@ -1135,7 +1182,8 @@ alternative, running `kinit` there, leaves a cache root can read and replay to
 become you everywhere in the realm for its full lifetime, still valid after you
 log out. It is structurally `ssh-agent` forwarding with a narrower grant. The
 operational rule that follows is to avoid mixing privilege levels and sudo on
-one host.
+one host. `krb-git`'s loopback port adds nothing to this: every connection to
+it is attributed through the kernel's TCP table and refused unless it is yours.
 
 ## Rollback
 
