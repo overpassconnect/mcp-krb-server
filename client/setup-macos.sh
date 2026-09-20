@@ -324,14 +324,15 @@ else
         # The bridge, the inert half that a host with no ticket runs, and the
         # wrappers that pick between them. A Mac is a workstation and will
         # normally use only the first, but it is also the machine that forwards
-        # the sockets, and mcp-fetch and krb-git are the commands its owner types.
-        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py mcp-fetch krb-git mcp-krb install-anchor.sh; do
+        # the sockets, and krb-fetch and krb-git are the commands its owner
+        # types. mcp-fetch is krb-fetch's former name, a shim kept so it works.
+        for f in mcp-krb-bridge.py mcp-krb-remote-bridge.py krb-fetch mcp-fetch krb-git mcp-krb install-anchor.sh; do
             curl --proto '=https' --tlsv1.2 -fsS "$BASE_URL/$f" -o "$APPDIR/$f"
             chmod 0755 "$APPDIR/$f"
             note_created "$APPDIR/$f"
         done
         say "bridge at $APPDIR/mcp-krb-bridge.py"
-        say "mcp-fetch and krb-git at $APPDIR (add it to PATH to type them plainly)"
+        say "krb-fetch and krb-git at $APPDIR (add it to PATH to type them plainly)"
 
         PY="$APPDIR/venv/bin/python3"
         ENTRY="{\"type\":\"stdio\",\"command\":\"$APPDIR/mcp-krb\",\"args\":[\"$MCP_URL\"]}"

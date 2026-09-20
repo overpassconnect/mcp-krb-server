@@ -468,7 +468,7 @@ def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
     parent = _check_dest(dest, force, allow_outside)
     conn, resp, _path = _open_response(url, cafile=cafile, host_suffix=host_suffix)
 
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix='.krb-fetch-', dir=parent)
     try:
         total, got = _stream(resp, lambda b: os.write(tmp_fd, b), max_bytes, sha256)
         os.close(tmp_fd); tmp_fd = None

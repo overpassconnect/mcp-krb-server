@@ -10,7 +10,7 @@
 //   YES  the download artifacts under join:/var/www/join/d  -- the installers
 //        (setup.sh/.ps1/setup-macos.sh, install-bridge.sh, install-anchor.sh,
 //        uninstall.*, JsoncEdit.ps1) and the bridge (mcp-krb-bridge.py,
-//        mcp-krb-remote-bridge.py, mcp-fetch, krb-git, mcp-krb). run.sh copies these
+//        mcp-krb-remote-bridge.py, krb-fetch, mcp-fetch, krb-git, mcp-krb). run.sh copies these
 //        VERBATIM -- no templating -- so shipping them straight from the
 //        checkout is byte-identical to a run.sh export, without needing a
 //        site.env secret on the agent.

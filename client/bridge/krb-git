@@ -1,7 +1,7 @@
 #!/bin/sh
 # krb-git - git over Kerberos from a host that holds no ticket.
 #
-# The sibling of mcp-fetch, and the same command works in two places:
+# The sibling of krb-fetch, and the same command works in two places:
 #
 #   on a workstation    git speaks Negotiate itself; this just turns it on
 #   on a shared host    there is no ticket, so git's HTTP to a realm host is

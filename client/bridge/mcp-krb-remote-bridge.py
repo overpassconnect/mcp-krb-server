@@ -188,7 +188,7 @@ def fetch(path, url, dest, sha256=None, force=False, allow_outside=False,
 
     digest = hashlib.sha256()
     total = 0
-    fd, tmp = tempfile.mkstemp(prefix='.mcp-fetch-', dir=parent)
+    fd, tmp = tempfile.mkstemp(prefix='.krb-fetch-', dir=parent)
     try:
         while True:
             n = int(need(10)[:8], 16)
@@ -314,7 +314,7 @@ def main():
     p.add_argument('--socket', metavar='PATH', dest='fetch_socket',
                    help='the forwarded fetch socket, for --fetch')
     p.add_argument('--force', action='store_true', help='overwrite an existing file')
-    # Accepted so that one mcp-fetch command line works on a workstation and on
+    # Accepted so that one krb-fetch command line works on a workstation and on
     # a shared host alike. A flag that exists in one place and is an argparse
     # error in the other makes the wrapper's whole premise false.
     p.add_argument('--allow-outside', action='store_true',

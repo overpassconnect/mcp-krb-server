@@ -57,7 +57,7 @@ has nothing at all. Nothing is copied, forwarded or minted to make a second you.
   ║         │                │ bridge │───── ④ SPNEGO ──────────────────┐   ║
   ║         │ runs           └───┬────┘                                 │   ║
   ║         ▼                    │ ⑦a --listen                          │   ║
-  ║    mcp-fetch ──┐             ▼                                      │   ║
+  ║    krb-fetch ──┐             ▼                                      │   ║
   ║    krb-git ────┤      ~/.mcp-krb.sock  0600                         │   ║
   ║                ├──▶ ~/.mcp-krb-fetch.sock  0600  ⑦b                 │   ║
   ║                └──▶ ~/.mcp-krb-git.sock  0600  ⑦c                   │   ║
@@ -77,7 +77,7 @@ has nothing at all. Nothing is copied, forwarded or minted to make a second you.
   ║                    /run/user/N/mcp-krb-git.sock    ◀── ⑦c           │   ║
   ║                              ▲            ▲                         │   ║
   ║                       stdio  │            │ asks the workstation    │   ║
-  ║    MCP client ──▶ remote bridge       mcp-fetch · krb-git           │   ║
+  ║    MCP client ──▶ remote bridge       krb-fetch · krb-git           │   ║
   ║         │                                  ▲                        │   ║
   ║         └────────── runs ──────────────────┘                        │   ║
   ║                                                                     │   ║
@@ -156,7 +156,7 @@ without holding your TGT, requires an identity the realm knows and rules it
 enforces. A shell script cannot be granted that, and should not be.
 
 **And the corollary:** things you could already do belong in the shell, not
-behind a tool. `mcp-fetch` and `krb-git` are deliberately **not** MCP tools. The
+behind a tool. `krb-fetch` and `krb-git` are deliberately **not** MCP tools. The
 assistant already has your ticket, so wrapping an HTTP GET or a `git pull` in a
 server call would add a hop, a schema and an audit line while changing nothing
 about what is possible.
@@ -637,7 +637,8 @@ client/          # everything that runs on a workstation
   bridge/            # what install-bridge.sh installs on a workstation
     mcp-krb-bridge.py  - the bridge itself (stdlib + python3-gssapi)
     mcp-krb-remote-bridge.py - the inert half, for a host that holds no ticket
-    mcp-fetch          - fetch one URL byte-exact, over whichever of the two applies
+    krb-fetch          - fetch one URL byte-exact, over whichever of the two applies
+    mcp-fetch          - krb-fetch's former name: a shim that runs it, kept so the name still works
     krb-git            - git through the same choice: Negotiate itself on a workstation, relayed on a shared host
     examples/          - mcp.json, mcp.json.windows, managed-mcp.json
 tests/           # hermetic unit tests (fake gssapi, no KDC needed)

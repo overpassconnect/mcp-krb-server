@@ -60,19 +60,24 @@ MANAGED_FILE="/etc/claude-code/managed-mcp.json"
 
 BRIDGE="mcp-krb-bridge.py"
 # The other halves of the same kit. The remote bridge is what an MCP client on a
-# host with no ticket talks to, and mcp-fetch and krb-git pick between the two
+# host with no ticket talks to, and krb-fetch and krb-git pick between the two
 # without the caller having to know which kind of machine this is. Installed
 # everywhere rather than conditionally: a workstation today is somebody's
 # shared dev host next month, and a missing file is a worse discovery than an
 # unused one.
 REMOTE="mcp-krb-remote-bridge.py"
-FETCH="mcp-fetch"
-FETCH_LINK="/usr/local/bin/mcp-fetch"
+FETCH="krb-fetch"
+FETCH_LINK="/usr/local/bin/krb-fetch"
 GIT="krb-git"
 GIT_LINK="/usr/local/bin/krb-git"
+# The name krb-fetch had before: a shim that runs krb-fetch, installed and
+# linked exactly as the real one was, so an earlier install's link and anyone's
+# notes keep working.
+FETCH_OLD="mcp-fetch"
+FETCH_OLD_LINK="/usr/local/bin/mcp-fetch"
 # The one command an MCP client is pointed at. It picks the local or the remote
 # bridge at spawn time by whether the forwarded socket is present, exactly as
-# mcp-fetch does, so the managed-mcp.json entry is the same on a workstation and
+# krb-fetch does, so the managed-mcp.json entry is the same on a workstation and
 # on a shared host. Installed everywhere for the same reason as the remote bridge.
 LAUNCH="mcp-krb"
 # The anchor setup script. Installed beside the bridge so a workstation can
@@ -310,7 +315,7 @@ fetch_retry() {
     return 1
 }
 
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$GIT" "$LAUNCH" "$ANCHOR"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$LAUNCH" "$ANCHOR"; do
     fetch_retry "$f" "$tmp/$f" || {
         echo "ERROR: could not fetch $BASE/$f - nothing was installed." >&2
         echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
@@ -326,16 +331,16 @@ done
 # created may be recorded as removable in the manifest.
 DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$GIT" "$LAUNCH" "$ANCHOR"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$LAUNCH" "$ANCHOR"; do
     $SUDO install -m 0755 "$tmp/$f" "$DEST/$f"
 done
 
-# mcp-fetch and krb-git are commands people type, so they go on PATH. A symlink
-# rather than a copy: each wrapper locates its siblings by directory, and two
-# copies drifting apart is the failure this avoids. Only a link this run created
-# is recorded as removable, so an existing command belonging to something else
-# survives uninstall. put_on_path <wrapper> <link> prints 1 when it made the
-# link and 0 otherwise.
+# krb-fetch and krb-git are commands people type, so they go on PATH, and so
+# does the old name. A symlink rather than a copy: each wrapper locates its
+# siblings by directory, and two copies drifting apart is the failure this
+# avoids. Only a link this run created is recorded as removable, so an existing
+# command belonging to something else survives uninstall. put_on_path <wrapper>
+# <link> prints 1 when it made the link and 0 otherwise.
 put_on_path() {
     if [ -e "$2" ] || [ -L "$2" ]; then
         if [ "$(readlink "$2" 2>/dev/null || true)" = "$DEST/$1" ]; then
@@ -353,6 +358,7 @@ put_on_path() {
     fi
 }
 FETCH_LINKED="$(put_on_path "$FETCH" "$FETCH_LINK")"
+FETCH_OLD_LINKED="$(put_on_path "$FETCH_OLD" "$FETCH_OLD_LINK")"
 GIT_LINKED="$(put_on_path "$GIT" "$GIT_LINK")"
 
 python3 -c 'import gssapi' 2>/dev/null || \
@@ -384,8 +390,9 @@ fi
 # path below is script-literal, which is what makes building the JSON by
 # concatenation safe. Non-fatal on failure, but loud: an install without a
 # manifest still works today and cannot be cleanly uninstalled tomorrow.
-FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$GIT\", \"$DEST/$LAUNCH\", \"$DEST/$ANCHOR\""
+FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$FETCH_OLD\", \"$DEST/$GIT\", \"$DEST/$LAUNCH\", \"$DEST/$ANCHOR\""
 [ "$FETCH_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_LINK\""
+[ "$FETCH_OLD_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_OLD_LINK\""
 [ "$GIT_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$GIT_LINK\""
 [ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
 FRAG_DIRS=""

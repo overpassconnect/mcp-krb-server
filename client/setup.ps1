@@ -869,7 +869,7 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|mcp-fetch|krb-git|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|krb-fetch|mcp-fetch|krb-git|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
 # Same reasoning as wslssh, one addition: git is directory-sensitive where ssh is
 # not, so this carries --cd. $PWD is the Windows working directory and wsl.exe
@@ -883,7 +883,7 @@ $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (set
 # so nobody has to memorise that list; using it for local work only costs a
 # round trip.
 $kept += "function wslgit { wsl.exe --cd `"`$PWD`" -e git @args }   # Kerberos git via WSL (setup.ps1)"
-# mcp-fetch runs in WSL because that is where the ticket is, which puts the
+# krb-fetch runs in WSL because that is where the ticket is, which puts the
 # destination path across a filesystem boundary. A path like C:\tmp\x reaches a
 # WSL process as an ordinary relative filename, backslashes and all, so it would
 # create a file by that literal name and report success. The bridge refuses such
@@ -892,7 +892,10 @@ $kept += "function wslgit { wsl.exe --cd `"`$PWD`" -e git @args }   # Kerberos g
 # wsl.exe inherits the translated working directory.
 # One line, because the profile is kept idempotent by matching whole `function`
 # lines and a multi-line definition would leave orphans behind on re-run.
-$kept += "function mcp-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e mcp-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
+$kept += "function krb-fetch { `$a=@(`$args); for(`$i=0;`$i -lt `$a.Count-1;`$i++){ if((`$a[`$i] -eq '-o' -or `$a[`$i] -eq '--output') -and `$a[`$i+1] -match '^[A-Za-z]:[\\/]'){ `$a[`$i+1]=(wsl.exe -e wslpath -u `$a[`$i+1]).Trim() } }; wsl.exe -e krb-fetch @a }   # Kerberos fetch via WSL (setup.ps1)"
+# The name krb-fetch had before. Kept so that notes and scripts which learned it
+# keep working; it only forwards to krb-fetch, translation included.
+$kept += "function mcp-fetch { krb-fetch @args }   # Kerberos fetch, old name, via WSL (setup.ps1)"
 # krb-git is the git command a shared host has, where there is no ticket and
 # git's HTTP is relayed back to this workstation. On the workstation itself it
 # is git with Negotiate switched on, which is what wslgit already is; it exists
@@ -924,7 +927,7 @@ $kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else 
 $kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
 $kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh, wslgit, mcp-fetch, krb-git, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
+Say 'PowerShell: wslssh, wslgit, krb-fetch (and mcp-fetch, its old name), krb-git, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
 
 # Windows git defaults to core.autocrlf=true and WSL git to false. With the
 # checkout on the Windows filesystem BOTH act on one worktree, so each sees files

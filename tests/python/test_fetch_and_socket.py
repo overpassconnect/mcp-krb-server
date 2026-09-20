@@ -63,7 +63,7 @@ class TestFetchPolicy(unittest.TestCase):
         self.assertIn("Windows path", r.stderr)
 
     def test_destination_outside_the_working_directory_is_refused(self):
-        outside = os.path.join(tempfile.gettempdir(), "mcp-fetch-outside-probe")
+        outside = os.path.join(tempfile.gettempdir(), "krb-fetch-outside-probe")
         r = run(["--fetch", "https://host.example.internal/x", "-o", outside,
                  "--allow-host-suffix", ".example.internal"], cwd=self.tmp)
         self.assertEqual(r.returncode, EXIT_REFUSED)
@@ -132,7 +132,7 @@ class TestSourceProperties(unittest.TestCase):
 
 
 class TestBothWritersRefuseTheSameDestinations(unittest.TestCase):
-    """mcp-fetch picks a writer by which machine it is on. The refusals must
+    """krb-fetch picks a writer by which machine it is on. The refusals must
     not depend on that choice.
 
     The destination checks are a copy in the remote bridge rather than an
@@ -196,7 +196,7 @@ class TestBothWritersRefuseTheSameDestinations(unittest.TestCase):
                               "the remote bridge does not refuse %s the way the "
                               "workstation does" % label)
                 self.assertFalse(
-                    [f for f in os.listdir(tmp) if f.startswith(".mcp-fetch-")],
+                    [f for f in os.listdir(tmp) if f.startswith(".krb-fetch-")],
                     "a refusal left a temporary file behind")
 
     @unittest.skipIf(os.name == "nt", "the remote bridge targets Unix-socket hosts")
@@ -314,7 +314,7 @@ class TestRemoteFetchWireProtocol(unittest.TestCase):
         r = self.client(path, d)
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(d, "out.bin")))
-        self.assertFalse([f for f in os.listdir(d) if f.startswith(".mcp-fetch-")])
+        self.assertFalse([f for f in os.listdir(d) if f.startswith(".krb-fetch-")])
 
     @unittest.skipIf(os.name == "nt", "Unix sockets")
     def test_an_abort_trailer_is_reported_and_nothing_is_written(self):
@@ -328,6 +328,47 @@ class TestRemoteFetchWireProtocol(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("too big", r.stderr)
         self.assertFalse(os.path.exists(os.path.join(d, "out.bin")))
+
+
+@unittest.skipIf(os.name == "nt", "the wrappers are POSIX sh scripts")
+class TestTheOldNameStillWorks(unittest.TestCase):
+    """mcp-fetch became krb-fetch. The old name ships as a shim that runs the new
+    one beside it, so the two cannot drift; this proves the shim reaches it."""
+
+    WRAPPERS = ROOT / "client" / "bridge"
+
+    def run_wrapper(self, name, home):
+        env = dict(os.environ)
+        env["MCP_KRB_HOME"] = home
+        return subprocess.run(["sh", str(self.WRAPPERS / name), "--version"],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def test_the_shim_runs_krb_fetch(self):
+        # An empty MCP_KRB_HOME makes krb-fetch refuse in its own words before it
+        # needs a socket or a bridge, which is the cheapest proof the shim
+        # handed over: the refusal names krb-fetch, not mcp-fetch.
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        r = self.run_wrapper("mcp-fetch", empty)
+        self.assertEqual(r.returncode, EXIT_NO_KRB)
+        self.assertIn("krb-fetch: MCP_KRB_HOME=", r.stderr)
+
+    def test_the_shim_resolves_a_link_to_itself(self):
+        # /usr/local/bin/mcp-fetch is a symlink to the shim, so $0 is the link;
+        # the sibling must still be found next to the real file.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        link = os.path.join(tmp, "mcp-fetch")
+        try:
+            os.symlink(str(self.WRAPPERS / "mcp-fetch"), link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        env = dict(os.environ)
+        env["MCP_KRB_HOME"] = tmp
+        r = subprocess.run(["sh", link, "--version"], capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertEqual(r.returncode, EXIT_NO_KRB)
+        self.assertIn("krb-fetch: MCP_KRB_HOME=", r.stderr)
 
 
 class TestRemoteBridgeHoldsNothing(unittest.TestCase):

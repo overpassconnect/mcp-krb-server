@@ -107,6 +107,18 @@ class UninstallSh(unittest.TestCase):
         self.assertNotIn('left alone: /usr/local/bin/mcp-fetch', r.stdout)
         self.assertFalse(os.path.exists(self.path('usr/local/bin/mcp-fetch')))
 
+    def test_the_krb_fetch_link_is_removed_when_the_installer_made_it(self):
+        # krb-fetch is the current name; the mcp-fetch tests above cover the
+        # old-name shim's link, which the installer still makes.
+        m = dict(MANIFEST)
+        m['created'] = MANIFEST['created'] + ['/usr/local/bin/krb-fetch']
+        self.make_tree(manifest=m)
+        self.put('usr/local/bin/krb-fetch', '#!/bin/sh')
+        r = self.run_uninstall('--yes')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('left alone: /usr/local/bin/krb-fetch', r.stdout)
+        self.assertFalse(os.path.exists(self.path('usr/local/bin/krb-fetch')))
+
     def test_the_krb_git_link_is_removed_when_the_installer_made_it(self):
         # Same shape as mcp-fetch: a command on PATH outside the kit tree.
         m = dict(MANIFEST)

@@ -18,7 +18,8 @@ anywhere.
 | `JsoncEdit.ps1` | helper used by `setup.ps1` | `setup.ps1` |
 | `mcp-krb-bridge.py` | the bridge itself | `install-bridge.sh` |
 | `mcp-krb-remote-bridge.py` | the half that holds nothing, for a host with no ticket | `install-bridge.sh` |
-| `mcp-fetch` | fetch one URL byte-exact; picks between the two above | `install-bridge.sh` |
+| `krb-fetch` | fetch one URL byte-exact; picks between the two above | `install-bridge.sh` |
+| `mcp-fetch` | `krb-fetch`'s former name: a shim that runs it, kept so the name still works | `install-bridge.sh` |
 | `krb-git` | git over Kerberos, through the same choice: git's own Negotiate on a workstation, relayed on a shared host | `install-bridge.sh` |
 
 ### The MCP host serves them
@@ -938,7 +939,7 @@ prompt means the realm CA is not trusted, which `setup-macos.sh` handles with
 
 Everything above installs three files from `bridge/`. This section is what the
 first of them is; the other two are covered under
-[Fetching a file](#fetching-a-file-mcp-fetch).
+[Fetching a file](#fetching-a-file-krb-fetch).
 
 Claude Code talks to a tiny local process over stdio; the bridge forwards each
 JSON-RPC message to the Kerberized MCP server with a fresh
@@ -1045,16 +1046,20 @@ Docker Desktop.
   the count, which is why none is written here) plus a live end-to-end run on real
   FreeIPA (bridge and server, including replay rejection).
 
-## Fetching a file: `mcp-fetch`
+## Fetching a file: `krb-fetch`
 
 Some content has to arrive byte-exact. A schema, a lockfile, a fixture, a
 config: a paraphrase of it is not it. Passing that through a model as text is
 the wrong shape, so the installers put a small command on `PATH`:
 
 ```
-mcp-fetch https://host.example.internal/schema.json -o schema.json
-mcp-fetch https://host.example.internal/schema.json -o schema.json --sha256 <hex>
+krb-fetch https://host.example.internal/schema.json -o schema.json
+krb-fetch https://host.example.internal/schema.json -o schema.json --sha256 <hex>
 ```
+
+It was called `mcp-fetch` until the commands were named for what they are about,
+Kerberos rather than MCP. That name still works: the installers keep a shim by it
+that runs `krb-fetch`, on PATH beside the real one.
 
 It authenticates with SPNEGO, streams to a temporary file in the destination
 directory, and renames only once the body is complete and any digest you gave
@@ -1115,7 +1120,7 @@ The stored remote is never rewritten, so it stays the normal `https://` URL, and
 a plain `git pull` without `krb-git` fails on the 401 rather than leaking
 anything.
 
-The rules are the ones `mcp-fetch` has, enforced on the workstation: the host
+The rules are the ones `krb-fetch` has, enforced on the workstation: the host
 must be in the realm, the upstream is always `https`, redirects are never
 followed, a CONNECT is refused, and any `Authorization` git was given is
 dropped in favour of the ticket. The loopback port is the one hop the socket's
@@ -1163,7 +1168,7 @@ Host dev.example.internal
 
 `RemoteForward` has taken Unix socket paths since OpenSSH 6.7. Use your own uid
 on the remote (`id -u`) in the left-hand paths; `~` is not expanded on that
-side. On the far end, `mcp-fetch` and `krb-git` notice their sockets and ask
+side. On the far end, `krb-fetch` and `krb-git` notice their sockets and ask
 the workstation instead of trying to do it themselves, and an MCP client is
 pointed at `mcp-krb-remote-bridge.py /run/user/1000/mcp-krb.sock`, which joins
 its stdio to the socket and holds nothing.

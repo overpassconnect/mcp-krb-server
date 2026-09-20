@@ -145,8 +145,10 @@ path_is_ours() {
         "$APPROOT"|"$APPROOT"/*) return 0 ;;
         /etc/claude-code|/etc/claude-code/*) return 0 ;;
         "$MANAGED_FILE") return 0 ;;
-        # The mcp-fetch and krb-git symlinks, and only when the installer
-        # recorded creating them: one that was already there is somebody else's.
+        # The krb-fetch, krb-git and old-name mcp-fetch symlinks, and only when
+        # the installer recorded creating them: one that was already there is
+        # somebody else's.
+        /usr/local/bin/krb-fetch) return 0 ;;
         /usr/local/bin/mcp-fetch) return 0 ;;
         /usr/local/bin/krb-git) return 0 ;;
         # Firefox-in-WSL: the Mozilla repo, its pin and keyring, and the policy

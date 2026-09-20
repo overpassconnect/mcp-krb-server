@@ -59,7 +59,7 @@ if (-not (Test-Path $ManifestPath)) {
     Say 'The manifest is what records which of the following setup.ps1 actually'
     Say 'created on THIS machine, as opposed to what was already here:'
     Say "  $binDir\ssh-dispatch.bat, and $binDir itself"
-    Say '  the wslssh, wslgit, mcp-fetch, krb-git and wslk* lines in the PowerShell profile (marker: setup.ps1)'
+    Say '  the wslssh, wslgit, krb-fetch, mcp-fetch, krb-git and wslk* lines in the PowerShell profile (marker: setup.ps1)'
     Say '  remote.SSH.* keys in each editor settings.json, and their prior values'
     Say '  the internal-tools entry in .claude.json'
     Say '  everything inside the WSL distro (its own manifest lives there)'
@@ -115,6 +115,7 @@ foreach ($f in $created) {
 $markers = @(
     '# Kerberos ssh via WSL (setup.ps1)',
     '# Kerberos fetch via WSL (setup.ps1)',
+    '# Kerberos fetch, old name, via WSL (setup.ps1)',
     '# Kerberos krb-git via WSL (setup.ps1)',
     '# Kerberos git via WSL (setup.ps1)',
     '# Kerberos kinit via WSL (setup.ps1)',

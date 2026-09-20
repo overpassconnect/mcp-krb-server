@@ -147,7 +147,7 @@ esac
 echo "anchor: $princ has IPA uid $uid; serving on this workstation."
 
 # Workstation-side sockets. Deliberately NOT /run/user/<uid>/mcp-krb*.sock: those
-# are the paths the launcher, mcp-fetch and krb-git check to decide
+# are the paths the launcher, krb-fetch and krb-git check to decide
 # remote-vs-local, so the anchor must serve elsewhere or this machine would
 # route to itself.
 LSOCK="$HOME/.mcp-krb.sock"

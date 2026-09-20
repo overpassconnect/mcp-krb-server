@@ -2,7 +2,7 @@
 # mcp-krb - start the MCP stdio bridge, local or remote, without being told which.
 #
 # One registered command for every machine. Which bridge runs is decided the
-# same way mcp-fetch decides it, by whether the forwarded socket is present, so
+# same way krb-fetch decides it, by whether the forwarded socket is present, so
 # the managed-mcp.json entry is identical on a workstation and on a shared host
 # and nobody has to remember what kind of machine they are on:
 #
@@ -25,13 +25,13 @@ set -eu
 
 MCP_URL="${1:-}"
 
-# The forwarded MCP socket. Same default shape as mcp-fetch's fetch socket, and
+# The forwarded MCP socket. Same default shape as krb-fetch's fetch socket, and
 # the same override, so the pair move together.
 SOCKET="${MCP_KRB_SOCKET:-/run/user/$(id -u)/mcp-krb.sock}"
 
 # MCP_KRB_HOME is an override, so it is obeyed exactly: pointing it somewhere
 # empty is an error, not a reason to quietly use the system install. Identical
-# resolution to mcp-fetch, on purpose.
+# resolution to krb-fetch, on purpose.
 if [ -n "${MCP_KRB_HOME:-}" ]; then
     APPDIR="$MCP_KRB_HOME"
     if [ ! -f "$APPDIR/mcp-krb-bridge.py" ] && [ ! -f "$APPDIR/mcp-krb-remote-bridge.py" ]; then
