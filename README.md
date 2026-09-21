@@ -5,6 +5,12 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![tests](https://github.com/overpassconnect/mcp-krb-server/actions/workflows/tests.yml/badge.svg)](https://github.com/overpassconnect/mcp-krb-server/actions/workflows/tests.yml)
 
+> **Status: under heavy development.** Names, installer flags and file layouts
+> still change between commits, so read the log before upgrading a deployment.
+> Known rough edge: the Firefox that `setup.ps1` installs inside WSL for Windows
+> workstations is not stable yet. The bridge, `wslssh`, `wslgit`, `krb-fetch` and
+> `krb-git` do not depend on it.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/authz-editor-dark.png">
   <img alt="The optional per-tool authorization editor: the policy as JSON on the left, every registered tool on the right, marked by whether the policy names it or it keeps its reviewed default" src="docs/authz-editor.png">
