@@ -5,6 +5,51 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![tests](https://github.com/overpassconnect/mcp-krb-server/actions/workflows/tests.yml/badge.svg)](https://github.com/overpassconnect/mcp-krb-server/actions/workflows/tests.yml)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/authz-editor-dark.png">
+  <img alt="The optional per-tool authorization editor: the policy as JSON on the left, every registered tool on the right, marked by whether the policy names it or it keeps its reviewed default" src="docs/authz-editor.png">
+</picture>
+
+*The server's optional policy editor. Each tool maps to the FreeIPA groups that may
+call it and, if it may act downstream as the caller, to the one service it may reach.*
+
+## TL;DR
+
+This is a system you deploy, in two halves, with one hook for your own code. It
+is not a library to import, and it is not an MCP client. You run the server on
+one host in your FreeIPA realm, hand the client kit to every workstation, and
+put your tools in one site file that this repository never carries.
+
+| Part | What you get | Where it runs | In the tree |
+|---|---|---|---|
+| **The server** | a Kerberised MCP server on the official Python SDK, behind nginx. Every request is authenticated offline by SPNEGO against a keytab; every tool call is authorized deny-by-default by FreeIPA group; every decision is an audit line. Optional: a tool may act downstream as the caller (constrained delegation), and a browser editor for the policy (pictured) | one Linux host in the realm | `server/` |
+| **Its installer** | one script that creates the service account, venv, keytab, systemd unit, nginx vhost and certificate, then publishes the client kit; a read-only verifier that checks the result | the same host | `server/install/` |
+| **The client kit** | a stdio bridge that mints a fresh Negotiate token per request, the `mcp-krb` launcher an MCP client is pointed at, `krb-fetch` for byte-exact files and `krb-git` for git over Kerberos, and the reverse bridge: a shared dev host that holds no ticket uses your workstation's through a socket forwarded by `ssh -R` | every workstation and shared dev host | `client/bridge/` |
+| **Workstation provisioning** | `setup.sh` (Linux: enrol, then install), `setup.ps1` (Windows without domain join: WSL2, Kerberos ssh, VS Code Remote-SSH, a browser that can SSO, the bridge), `setup-macos.sh`, uninstallers driven by install manifests, and a provisioning web page the installer serves | workstations | `client/`, `client/web/` |
+| **Your tools** | a Python file loaded through `MCP_SITE_TOOLS`, each tool declaring the groups that may call it, plus an HTML fragment for the page's site-specific sections. Neither lives in this repository | your deployment | `MCP_SITE_TOOLS`, `CLIENT_SITE_SECTIONS` |
+| **Assurance** | the security review with threat model, ranked findings and deployment checklist; a hermetic test suite that needs no KDC and runs on Windows and Linux; a CI pipeline for publishing the kit | | `SECURITY.md`, `tests/`, `jenkins/` |
+
+What that gives a team, concretely:
+
+- A developer types one password, at login. From then on an MCP client such as
+  Claude Code reaches the internal server with nothing to configure and no secret
+  stored anywhere. Disabling the account in FreeIPA ends the access.
+- The server sees the real principal on every call, decides by directory group,
+  and logs who did what under their own name.
+- A tool can call CI, a forge or any other Kerberised service as the person who
+  asked, so the downstream system attributes the action to them and bounds it by
+  their permissions there.
+- On a shared dev host with no ticket, the same things work: reaching the MCP
+  server, fetching a file, and git clone, pull and push, all through a socket the
+  workstation forwards. No credential is copied to the host.
+- A Windows workstation that is not domain-joined gets passwordless ssh, VS Code
+  Remote-SSH and single sign-on in a browser, through WSL2.
+
+What it assumes: FreeIPA (or another MIT Kerberos realm with an LDAP directory
+you can adapt the group lookup to), Linux hosts for the server and the shared
+machines, and an MCP client that speaks stdio. The tools it ships are stubs; the
+scaffolding around them is the product.
+
 ## What it is
 
 MCP has no enterprise single-sign-on story. Claude Code's MCP client can attach an
@@ -643,6 +688,7 @@ client/          # everything that runs on a workstation
     examples/          - mcp.json, mcp.json.windows, managed-mcp.json
 tests/           # hermetic unit tests (fake gssapi, no KDC needed)
   run-tests.sh, python/
+docs/            # the images this README shows; nothing here is installed anywhere
 ```
 
 The installer directory is `server/install/`. If you find a doc or a script
