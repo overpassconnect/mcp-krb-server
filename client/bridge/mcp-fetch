@@ -6,8 +6,10 @@
 #
 # Invoked through a link (/usr/local/bin/mcp-fetch points here), $0 names the
 # link rather than this file, so it is resolved before the sibling is looked up.
+# The sibling is run through sh rather than executed, like every script in this
+# kit: a checkout carries no execute bits, only an install does.
 self="$0"
 if [ -L "$self" ]; then
     self="$(readlink -f "$self" 2>/dev/null || readlink "$self")"
 fi
-exec "$(dirname "$self")/krb-fetch" "$@"
+exec sh "$(dirname "$self")/krb-fetch" "$@"
