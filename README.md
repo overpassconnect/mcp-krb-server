@@ -26,8 +26,14 @@ put your tools in one site file that this repository never carries.
 | **Its installer** | one script that creates the service account, venv, keytab, systemd unit, nginx vhost and certificate, then publishes the client kit; a read-only verifier that checks the result | the same host | `server/install/` |
 | **The client kit** | a stdio bridge that mints a fresh Negotiate token per request, the `mcp-krb` launcher an MCP client is pointed at, `krb-fetch` for byte-exact files and `krb-git` for git over Kerberos, and the reverse bridge: a shared dev host that holds no ticket uses your workstation's through a socket forwarded by `ssh -R` | every workstation and shared dev host | `client/bridge/` |
 | **Workstation provisioning** | `setup.sh` (Linux: enrol, then install), `setup.ps1` (Windows without domain join: WSL2, Kerberos ssh, VS Code Remote-SSH, a browser that can SSO, the bridge), `setup-macos.sh`, uninstallers driven by install manifests, and a provisioning web page the installer serves | workstations | `client/`, `client/web/` |
-| **Your tools** | a Python file loaded through `MCP_SITE_TOOLS`, each tool declaring the groups that may call it, plus an HTML fragment for the page's site-specific sections. Neither lives in this repository | your deployment | `MCP_SITE_TOOLS`, `CLIENT_SITE_SECTIONS` |
-| **Assurance** | the security review with threat model, ranked findings and deployment checklist; a hermetic test suite that needs no KDC and runs on Windows and Linux; a CI pipeline for publishing the kit | | `SECURITY.md`, `tests/`, `jenkins/` |
+
+Your own tools go in one Python file, loaded through `MCP_SITE_TOOLS`, each
+declaring the groups that may call it. The page's site-specific sections go in
+one HTML fragment, through `CLIENT_SITE_SECTIONS`. Neither lives in this
+repository, so a deployment never maintains a fork of a file it did not write.
+Behind all of it sits [SECURITY.md](SECURITY.md), the review with the threat
+model, ranked findings and deployment checklist, and a hermetic test suite that
+runs on Windows and Linux with no KDC.
 
 What that gives a team, concretely:
 
