@@ -39,7 +39,7 @@ def main():
         "whoami":              {"groups": any_token},
         "list_projects":       {"groups": ["developers", "ops"]},
         "list_docs":           {"groups": ["developers", "ops"]},
-        "read_doc":            {"groups": ["developers", "ops"]},
+        "read_doc":            {"groups": ["developers", "ops"], "forwards_to": "HTTP@wiki.example.internal"},
         "list_pull_requests":  {"groups": ["developers"]},
         "review_pull_request": {"groups": ["developers"], "forwards_to": "HTTP@git.example.internal"},
         "merge_pull_request":  {"groups": ["senior-developers"], "forwards_to": "HTTP@git.example.internal"},
