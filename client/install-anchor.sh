@@ -125,18 +125,19 @@ princ="$(klist 2>/dev/null | grep -oE '[[:alnum:]._-]+@[[:alnum:].-]+' | head -1
 # CA was added to. An explicit --cacert on a file works whichever curl is first
 # on PATH; without it the lookup fails only on the Homebrew-curl Macs, which is
 # the intermittent "could not read a numeric uid" nobody could reproduce.
+# Kept as a bare path and expanded quoted: the macOS APPDIR has a space in it
+# ("Application Support"), so an unquoted "--cacert $path" splits into a bogus
+# CA file plus a stray URL and the login fails with a misleading "kinit" hint.
 CA=""
 for _ca in /etc/ipa/ca.crt "$APPDIR/realm-ca.crt"; do
-    [ -r "$_ca" ] && { CA="--cacert $_ca"; break; }
+    [ -r "$_ca" ] && { CA="$_ca"; break; }
 done
 CJ="$(mktemp)"; trap 'rm -f "$CJ"' EXIT
-# shellcheck disable=SC2086
-code="$(curl -sS -o /dev/null -w '%{http_code}' $CA --negotiate -u : -c "$CJ" \
+code="$(curl -sS -o /dev/null -w '%{http_code}' ${CA:+--cacert "$CA"} --negotiate -u : -c "$CJ" \
     -H "Referer: $IPA_URL/ipa" "$IPA_URL/ipa/session/login_kerberos" 2>/dev/null || echo 000)"
 [ "$code" = 200 ] || { echo "install-anchor.sh: IPA login failed ($code) at $IPA_URL." >&2
     echo "  A valid ticket is needed to read your uid. kinit and retry." >&2; exit 2; }
-# shellcheck disable=SC2086
-uid="$(curl -sS $CA --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
+uid="$(curl -sS ${CA:+--cacert "$CA"} --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
     -H 'Content-Type: application/json' -H 'Accept: application/json' \
     -d '{"method":"user_show","params":[["'"$princ"'"],{"version":"2.251"}],"id":0}' \
     "$IPA_URL/ipa/session/json" 2>/dev/null \
@@ -250,7 +251,14 @@ install_launchd() {
     write_plist "com.overpassconnect.mcp-krb.anchor-git" "$gitp" \
         "$PY" "$APPDIR/mcp-krb-bridge.py" --git-listen "$LGSOCK"
     for _f in "$mcp" "$fetch" "$gitp"; do
-        launchctl bootout "gui/$(id -u)/$(basename "$_f" .plist)" 2>/dev/null || true
+        _svc="gui/$(id -u)/$(basename "$_f" .plist)"
+        launchctl bootout "$_svc" 2>/dev/null || true
+        # bootout returns before a running job has left the domain, and a
+        # bootstrap over it fails with "5: Input/output error". Wait it out.
+        _n=0
+        while launchctl print "$_svc" >/dev/null 2>&1 && [ "$_n" -lt 50 ]; do
+            sleep 0.1; _n=$((_n + 1))
+        done
         launchctl bootstrap "gui/$(id -u)" "$_f"
     done
     echo "anchor: launchd agents loaded."

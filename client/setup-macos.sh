@@ -125,9 +125,15 @@ CREATED=''
 CREATED_DIRS=''
 REPLACED=''
 
-note_created()     { CREATED="$CREATED $1"; }
-note_created_dir() { CREATED_DIRS="$CREATED_DIRS $1"; }
-note_replaced()    { REPLACED="$REPLACED $1"; }
+# One path per line, not per space: APPDIR is under "Application Support", and a
+# space-separated list split every kit path in two, so the manifest recorded
+# "/Users/x/Library/Application" and "Support/mcp-krb/..." and uninstall could
+# match none of them.
+NL='
+'
+note_created()     { CREATED="$CREATED$NL$1"; }
+note_created_dir() { CREATED_DIRS="$CREATED_DIRS$NL$1"; }
+note_replaced()    { REPLACED="$REPLACED$NL$1"; }
 
 echo "==> provisioning for $REALM"
 
@@ -421,8 +427,16 @@ except (OSError, ValueError):
     pass
 
 
+def paths(name):
+    return [p for p in os.environ[name].split("\n") if p]
+
+
 def union(key, extra):
-    seen = list(old.get(key, []))
+    # An older run split paths at their space. The tail is relative, which
+    # nothing here records, and the head is a prefix-plus-space of a whole path
+    # this run records; both are dropped and the whole paths take their place.
+    seen = [p for p in old.get(key, []) if p.startswith("/")
+            and not any(v.startswith(p + " ") for v in extra)]
     for v in extra:
         if v not in seen:
             seen.append(v)
@@ -431,12 +445,12 @@ def union(key, extra):
 
 replaced = dict(old.get("replaced", {}))
 replaced.update({p: os.path.join(appdir, "krb5.conf.orig")
-                 for p in os.environ["REPLACED"].split()})
+                 for p in paths("REPLACED")})
 
 m = {"manifest_version": 1,
      "written_by": "setup-macos.sh",
-     "created": union("created", os.environ["CREATED"].split()),
-     "created_dirs": union("created_dirs", os.environ["CREATED_DIRS"].split()),
+     "created": union("created", paths("CREATED")),
+     "created_dirs": union("created_dirs", paths("CREATED_DIRS")),
      "replaced": replaced,
      "packages_installed": [],
      "packages_already_present": [],
