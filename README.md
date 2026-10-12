@@ -349,8 +349,9 @@ group-writable path.
   `ctx.complete`, true GSS completeness per RFC 2743).
 - No session to steal. The server runs `stateless_http=True`, so no `Mcp-Session-Id`
   is ever issued or honoured as a bearer credential (`[S1]`).
-- Authorization is deny by default, per tool, by IPA group, resolved through SSSD's
-  local cache with no network call on the request path (`[S2]`).
+- Authorization is deny by default, per tool, by IPA group, resolved through SSSD
+  at call time. The installer keeps SSSD's answers at most a second old, so a group
+  change in IPA applies at the next call (`[S2]`).
 - Who may call what is code rather than configuration: `authz.TOOL_GROUPS` and
   `delegation.TOOL_TARGETS` live in security-owned files, so changing them is a
   reviewed change. A bounded operator overlay (`MCP_DELEGATION_TARGETS`) exists for
@@ -442,8 +443,8 @@ Non-domain-joined Windows workstations need one extra step, covered under
                                       |         | ===== Gate 2: may you do this =================
                                       |         |   require(ctx, '<this tool's own literal name>')
                                       |         |     authz.TOOL_GROUPS[tool] -> IPA group set
-                                      |         |     os.getgrouplist via SSSD's local cache
-                                      |         |     no network. Any error -> deny. [S2]
+                                      |         |     os.getgrouplist via SSSD, which asks
+                                      |         |     IPA again after 1 s. Any error -> deny. [S2]
                                       |         |        |
                                       |         |   every decision, allow or deny, -> JSON audit
                                       |         |   line on stderr -> journald

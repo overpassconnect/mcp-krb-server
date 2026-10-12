@@ -41,10 +41,12 @@ def authorize_connection(principal):
 
 
 # --- IPA group lookup via nss/SSSD -----------------------------------------
-# SSSD caches IPA group membership locally on this host, so os.getgrouplist is a
-# fast local call with no per-request network. Fail closed (return empty, which
-# denies) on any error. Platform-guarded so this module still imports where
-# pwd/grp are absent (e.g. Windows CI running the hermetic tests).
+# os.getgrouplist asks SSSD, which answers from its cache while the cached record
+# is fresh and asks IPA otherwise. run.sh step 2b caps that at one second (SSSD's
+# default is 90 minutes, kept across reboots); see SECURITY.md [S2]. Fail closed
+# (return empty, which denies) on any error. Platform-guarded so this module
+# still imports where pwd/grp are absent (e.g. Windows CI running the hermetic
+# tests).
 _USER_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 
 try:

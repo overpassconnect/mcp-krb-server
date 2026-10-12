@@ -329,18 +329,31 @@ never silently redirect a target a reviewer approved. The full grammar, the caps
 and the fail-at-import behaviour are in [D1] under "Where targets come from".
 
 The group lookup is now real rather than stubbed: `ipa_groups()` calls
-`os.getgrouplist()` (nss → SSSD), which reads SSSD's local cache of the user's IPA
-group membership - a fast local call with no per-request network and no
-subprocess. It fails closed (any error → empty set → deny) and validates the
-local part against a strict regex before touching nss (so junk never reaches the
-resolver). The allow path is now tested both in isolation (`test_authz.py`: in-group
-allows, out-of-group / extra-groups / unknown-tool deny, union, fail-closed lookup)
-and end-to-end through the SDK (`test_mcp_server.py`: `restart_service` runs for an
-`mcp-operators` member, denied otherwise).
+`os.getgrouplist()` (nss → SSSD), with no subprocess. It fails closed (any error →
+empty set → deny) and validates the local part against a strict regex before
+touching nss (so junk never reaches the resolver). The allow path is now tested both
+in isolation (`test_authz.py`: in-group allows, out-of-group / extra-groups /
+unknown-tool deny, union, fail-closed lookup) and end-to-end through the SDK
+(`test_mcp_server.py`: `restart_service` runs for an `mcp-operators` member, denied
+otherwise).
+
+SSSD decides how fresh that answer is. Its defaults reuse an answer for 90 minutes
+and keep it on disk, so it survives a reboot: on a live deployment a user added to a
+group stayed refused through a host restart, and a user removed from a group keeps
+access for just as long. `run.sh` step 2b therefore writes
+`/etc/sssd/conf.d/50-mcp-authz-nocache.conf`, which sets `entry_cache_timeout = 1`
+for the IPA domain and `memcache_timeout = 0` (SSSD's in-memory cache), and
+`verify.sh` check 11 confirms SSSD applied it. SSSD cannot switch its cache off
+entirely; one second is the shortest timeout its maintainers recommend. The cost is
+a few LDAP lookups against IPA for a tool call that comes more than a second after
+the previous lookup of that user. One gap remains: while IPA is unreachable, SSSD
+answers from its cache (offline mode), so a removal takes effect only once IPA
+answers again. Closing it would mean asking IPA directly and denying when it does
+not answer, which this code does not do.
 
 Operating it (DX): the common change - who may call a tool - is a FreeIPA group
 membership edit (add/remove the user in `mcp-operators` / `mcp-users` in the IPA web
-UI), no code and no deploy; SSSD picks it up within its cache TTL. Only a
+UI), no code and no deploy; it applies at the user's next call. Only a
 structural change (a new tool, or changing which group(s) a tool requires) edits
 `TOOL_GROUPS`, which is a code review + deploy. Requires the server host to be
 IPA-enrolled with SSSD resolving the relevant groups (`getent group mcp-operators`).
@@ -766,7 +779,9 @@ concerns, not code changes in this tree.
    invisible to `getent`, which is the lookup that actually decides. Membership stays
    human, because membership *is* the authorization decision. Until the groups resolve,
    `authorize_tool()` fails closed and every non-open tool denies everyone while the
-   deployment still looks healthy. [S2]
+   deployment still looks healthy. The same check confirms SSSD applied the
+   one-second cache setting from `run.sh` step 2b; without it a membership change
+   takes up to 90 minutes to reach the server, through a reboot. [S2]
 9. Keep MIT krb5 patched. [CVE]
 10. Delegation stays off unless evidence-based S4U2Proxy is deliberately enabled;
     protocol transition (`ok_to_auth_as_delegate`) stays off permanently. [D1]

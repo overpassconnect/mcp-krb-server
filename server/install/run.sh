@@ -3,8 +3,8 @@
 #
 # Runs as root on a host that is already IPA-enrolled. It replaces the ad-hoc
 # root-shell steps that built the first server by hand: package installs, the
-# venv, the keytab, the rendered unit and vhost, the certificate, the renewal
-# hook and the final verification.
+# SSSD cache setting for group lookups, the venv, the keytab, the rendered unit
+# and vhost, the certificate, the renewal hook and the final verification.
 #
 #   sudo sh server/install/run.sh --site-env /etc/mcp-server/site.env
 #
@@ -654,7 +654,7 @@ if [ "$CLIENT_ONLY" = 0 ]; then
 step "1. packages"
 
 if [ "$PKGMGR" = apt ]; then
-    PKGS="nginx certbot python3-certbot-nginx python3-venv python3-gssapi krb5-user freeipa-client"
+    PKGS="nginx certbot python3-certbot-nginx python3-venv python3-gssapi krb5-user freeipa-client sssd-tools"
     # A stale package list is why the first build failed with "Unable to locate
     # package freeipa-client". An update failure is tolerated; a missing package
     # is not: the assertion loop below is the real gate.
@@ -667,7 +667,7 @@ if [ "$PKGMGR" = apt ]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $PKGS
     fi
 else
-    PKGS="nginx certbot python3-certbot-nginx python3-gssapi krb5-workstation"
+    PKGS="nginx certbot python3-certbot-nginx python3-gssapi krb5-workstation sssd-tools"
     if [ "$DRY_RUN" = 1 ]; then
         say "  would install: $PKGS ipa-client"
     else
@@ -715,6 +715,72 @@ if [ "$DRY_RUN" != 1 ]; then
     getent passwd "$SVCUSER"  >/dev/null 2>&1 || die "user $SVCUSER does not exist after account setup.
   The unit declares User=$SVCUSER and will fail with
   'Failed to determine user credentials: No such process'."
+fi
+
+# --------------------------------------------------------------------------
+# 2b. SSSD GROUP LOOKUPS
+#     authz.ipa_groups() asks SSSD for the caller's IPA groups on every tool
+#     call. With SSSD's defaults an answer is reused for 90 minutes and kept on
+#     disk, so it also outlives a reboot. On a live host that meant a user added
+#     to a group in IPA kept being refused, through a reboot, until the cached
+#     record expired, and a user removed from a group keeps access just as long.
+#
+#     SSSD cannot switch its cache off. One second is the shortest timeout its
+#     maintainers recommend, and the in-memory cache in front of it is switched
+#     off too, so a group change in IPA applies at the next call. While IPA is
+#     unreachable SSSD still answers from its cache; see SECURITY.md [S2].
+#
+#     SSSD skips a snippet that is not root:root 0600 without failing, which
+#     would leave the 90-minute cache in place behind a file that looks right.
+#     verify.sh check 11 tests that SSSD actually applied it.
+# --------------------------------------------------------------------------
+step "2b. SSSD group lookups"
+
+SSSD_SNIPPET=/etc/sssd/conf.d/50-mcp-authz-nocache.conf
+IPA_DOMAIN="$(sed -n 's/^domain *= *//p' /etc/ipa/default.conf | head -1)"
+printf '%s\n' "$IPA_DOMAIN" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' \
+    || die "/etc/ipa/default.conf has no usable 'domain =' line (got '$IPA_DOMAIN'). Nothing has been changed."
+# The section has to name the domain SSSD actually serves. A snippet for any
+# other name is read and then applies to nothing.
+grep -qs "^\[domain/$IPA_DOMAIN\]" /etc/sssd/sssd.conf \
+    || die "/etc/sssd/sssd.conf has no [domain/$IPA_DOMAIN] section, so a cache setting
+  for that domain would apply to nothing. ipa-client-install writes that section;
+  check how this host was enrolled. Nothing has been changed."
+[ -d /etc/sssd/conf.d ] \
+    || die "/etc/sssd/conf.d does not exist, so this SSSD may not read snippets at all.
+  Upgrade sssd, or create the directory if your sssd reads it. Nothing has been changed."
+
+cat > "$TMPROOT/sssd-snippet.conf" <<EOF
+# Written by mcp-krb-server server/install/run.sh, step 2b. A re-run rewrites it.
+# Keeps SSSD's answers for the MCP server's group checks at most a second old.
+# Why: SECURITY.md [S2]. To undo: delete this file and restart sssd.
+[domain/$IPA_DOMAIN]
+entry_cache_timeout = 1
+entry_cache_nowait_percentage = 0
+
+[nss]
+memcache_timeout = 0
+EOF
+
+if [ -f "$SSSD_SNIPPET" ] && cmp -s "$TMPROOT/sssd-snippet.conf" "$SSSD_SNIPPET"; then
+    say "unchanged: $SSSD_SNIPPET"
+else
+    run install -m 0600 -o root -g root "$TMPROOT/sssd-snippet.conf" "$SSSD_SNIPPET"
+    if ! run systemctl restart sssd; then
+        run rm -f "$SSSD_SNIPPET"
+        run systemctl restart sssd || true
+        die "sssd did not restart with $SSSD_SNIPPET, so the snippet was removed again.
+  Read why with:  journalctl -u sssd -n 50 --no-pager"
+    fi
+    # A new timeout applies only to records fetched after it. Expire the ones
+    # already cached, or they keep their 90 minutes.
+    if command -v sss_cache >/dev/null 2>&1; then
+        run sss_cache -E
+    else
+        warn "sss_cache is missing (package sssd-tools), so records cached before this run
+         keep their old expiry, at most 90 minutes."
+    fi
+    say "wrote $SSSD_SNIPPET and restarted sssd"
 fi
 
 # --------------------------------------------------------------------------

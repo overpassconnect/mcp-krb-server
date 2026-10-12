@@ -603,6 +603,36 @@ PY
     fi
 fi
 
+# A group that resolves can still resolve STALE. With SSSD's defaults this host
+# reuses an answer for 90 minutes, through a reboot, so a membership change in
+# IPA does not reach authorize_tool() for that long. run.sh step 2b writes the
+# snippet below. The file being there proves little, because SSSD skips a
+# snippet that is not root:root 0600 without failing, so the last test asks
+# SSSD itself: with memcache_timeout = 0 it keeps no fast-cache files at all,
+# and a file there means the snippet is not in effect.
+SSSD_SNIPPET=/etc/sssd/conf.d/50-mcp-authz-nocache.conf
+if [ "$(id -u)" != 0 ]; then
+    skip "SSSD cache setting: reading $SSSD_SNIPPET needs root"
+elif [ ! -f "$SSSD_SNIPPET" ]; then
+    fail "$SSSD_SNIPPET is missing, so SSSD reuses group answers for up to 90 minutes"
+    info "a group change in IPA reaches this host only when the cached record expires"
+    info "fix: re-run server/install/run.sh (step 2b writes it)"
+else
+    _own="$(stat -c '%U:%G %a' "$SSSD_SNIPPET" 2>/dev/null || echo '?')"
+    if [ "$_own" != "root:root 600" ]; then
+        fail "$SSSD_SNIPPET is $_own, and SSSD ignores a snippet that is not root:root 600"
+    elif ! grep -Eq '^entry_cache_timeout *= *1$' "$SSSD_SNIPPET" \
+        || ! grep -Eq '^memcache_timeout *= *0$' "$SSSD_SNIPPET"; then
+        fail "$SSSD_SNIPPET does not set entry_cache_timeout = 1 and memcache_timeout = 0"
+        info "fix: re-run server/install/run.sh, which rewrites it"
+    elif ls /var/lib/sss/mc/* >/dev/null 2>&1; then
+        fail "SSSD still keeps fast-cache files in /var/lib/sss/mc, so $SSSD_SNIPPET is not in effect"
+        info "fix: systemctl restart sssd"
+    else
+        pass "SSSD answers group lookups from data at most 1 s old while IPA is reachable"
+    fi
+fi
+
 # --------------------------------------------------------------------------
 head2 "12. client bundle, if this host serves it"
 # --------------------------------------------------------------------------
