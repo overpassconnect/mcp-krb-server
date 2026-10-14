@@ -1144,6 +1144,14 @@ all three on every `kinit`, so an anchor set up before one of them existed is
 completed rather than left a socket short. `install-anchor.sh --uninstall`
 reverses it. The rest of this section is what that automates, done by hand.
 
+On every `kinit` it also sets git's global `user.email` to the address IPA has
+for you, and `user.name` from IPA if none is set. A commit carries whatever
+address git is configured with, and the forges credit it by that address, so
+this keeps your commits under your realm identity wherever you push them. The
+replaced address is kept under `mcp-krb.priorUserEmail` and `--uninstall` puts
+it back; a repository's own `user.email` still wins inside that repository. In
+WSL this is WSL's git; the Windows git configuration is not touched.
+
 A shared dev host holds a *machine* keytab and no user ticket, by design:
 `ssh` runs with `GSSAPIDelegateCredentials no`, so nothing of yours is copied
 there. That leaves it unable to fetch anything as you, which is the point.

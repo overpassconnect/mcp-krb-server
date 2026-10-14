@@ -12,6 +12,8 @@
 #   sh install-anchor.sh --mcp-url URL --domain D --ipa-url URL [--dry-run]
 #
 # It is idempotent: re-running replaces the units and the ssh block in place.
+# On every run, including the silent ones once the anchor is up, it also keeps
+# git's global user.email equal to the address IPA has for the ticket holder.
 set -eu
 
 MCP_URL=""; DOMAIN=""; IPA_URL=""; DRY=0; UNINSTALL=0; FORCE=0
@@ -60,6 +62,15 @@ if [ "$UNINSTALL" = 1 ]; then
     esac
     strip_ssh_block
     rm -f "$HOME/.mcp-krb.sock" "$HOME/.mcp-krb-fetch.sock" "$HOME/.mcp-krb-git.sock"
+    # Put back the git address the identity sync replaced, if it replaced one.
+    if command -v git >/dev/null 2>&1 \
+            && git config --global --get mcp-krb.priorUserEmail >/dev/null 2>&1; then
+        _prior="$(git config --global --get mcp-krb.priorUserEmail)"
+        if [ -n "$_prior" ]; then git config --global user.email "$_prior"
+        else git config --global --unset user.email || :; fi
+        git config --global --unset mcp-krb.priorUserEmail || :
+        echo "anchor: git user.email restored to ${_prior:-unset}."
+    fi
     echo "anchor: removed units/agents, the ssh block, and the sockets."
     exit 0
 fi
@@ -83,6 +94,85 @@ done
 [ -n "$APPDIR" ] || { echo "install-anchor.sh: no bridge at /opt/mcp-krb or the macOS path." >&2
     echo "  Install the bridge first (install-bridge.sh / setup)." >&2; exit 2; }
 if [ -x "$APPDIR/venv/bin/python3" ]; then PY="$APPDIR/venv/bin/python3"; else PY=python3; fi
+
+# Who holds the ticket. MIT klist labels it "Default principal:", Heimdal (macOS)
+# says "Principal:", so match the first user@realm in the output rather than a
+# label, and cut at @.
+princ="$(klist 2>/dev/null | grep -oE '[[:alnum:]._-]+@[[:alnum:].-]+' | head -1 | cut -d@ -f1)"
+
+# The realm CA that pins the IPA lookup below. Linux enrolment leaves it at the
+# first path; setup-macos.sh saves it to the second, because a Mac has no
+# /etc/ipa and its curl may be Homebrew's, which ignores the System keychain the
+# CA was added to. An explicit --cacert on a file works whichever curl is first
+# on PATH; without it the lookup fails only on the Homebrew-curl Macs, which is
+# the intermittent "could not read a numeric uid" nobody could reproduce.
+# Kept as a bare path and expanded quoted: the macOS APPDIR has a space in it
+# ("Application Support"), so an unquoted "--cacert $path" splits into a bogus
+# CA file plus a stray URL and the login fails with a misleading "kinit" hint.
+CA=""
+for _ca in /etc/ipa/ca.crt "$APPDIR/realm-ca.crt"; do
+    [ -r "$_ca" ] && { CA="$_ca"; break; }
+done
+
+# This person's IPA record: one Kerberos login and one user_show, on every run.
+# Two readers use it: the git identity just below, refreshed on every ticket,
+# and the uid further down, needed only while the anchor is being set up.
+CJ="$(mktemp)"; IJ="$(mktemp)"; trap 'rm -f "$CJ" "$IJ"' EXIT
+code=000
+if [ -n "$princ" ]; then
+    code="$(curl -sS -o /dev/null -w '%{http_code}' ${CA:+--cacert "$CA"} --negotiate -u : -c "$CJ" \
+        -H "Referer: $IPA_URL/ipa" "$IPA_URL/ipa/session/login_kerberos" 2>/dev/null || echo 000)"
+    if [ "$code" = 200 ]; then
+        curl -sS ${CA:+--cacert "$CA"} --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            -d '{"method":"user_show","params":[["'"$princ"'"],{"version":"2.251"}],"id":0}' \
+            "$IPA_URL/ipa/session/json" > "$IJ" 2>/dev/null || :
+    fi
+fi
+
+# The git identity follows IPA. A commit carries whatever address git is
+# configured with, the forges credit it by that address, and a push through
+# Gitea and its mirror changes nothing in it; so the global user.email is kept
+# equal to the address IPA has for this person, and user.name is filled from IPA
+# only where none is set. A repository's own user.email (git config without
+# --global) still wins inside that repository. The address it replaces is kept
+# once, under mcp-krb.priorUserEmail, for --uninstall to put back. Silent unless
+# it changes something, and never fatal: a ticket must not fail because IPA was
+# slow to answer, and the kinit wrappers return this script's status.
+sync_git_identity() {
+    command -v git >/dev/null 2>&1 || return 0
+    [ -s "$IJ" ] || return 0
+    _id="$("$PY" -c '
+import json, sys
+r = json.load(sys.stdin)["result"]["result"]
+first = lambda k: (r.get(k) or [""])[0]
+print(first("mail"))
+print(" ".join(x for x in (first("givenname"), first("sn")) if x))
+' < "$IJ" 2>/dev/null)" || return 0
+    _mail="$(printf '%s\n' "$_id" | sed -n 1p)"
+    _name="$(printf '%s\n' "$_id" | sed -n 2p)"
+    case "$_mail" in *@*.*) ;; *) return 0 ;; esac
+    _cur="$(git config --global user.email 2>/dev/null || :)"
+    if [ "$_cur" != "$_mail" ]; then
+        if [ "$DRY" = 1 ]; then
+            echo "would: set git user.email to $_mail, the address IPA has for $princ"
+        else
+            git config --global --get mcp-krb.priorUserEmail >/dev/null 2>&1 \
+                || git config --global mcp-krb.priorUserEmail "$_cur" || :
+            git config --global user.email "$_mail" \
+                && echo "git: user.email set to $_mail, the address IPA has for $princ."
+        fi
+    fi
+    if [ -n "$_name" ] && [ -z "$(git config --global user.name 2>/dev/null || :)" ]; then
+        if [ "$DRY" = 1 ]; then
+            echo "would: set git user.name to $_name (none was set)"
+        else
+            git config --global user.name "$_name" && echo "git: user.name set to $_name from IPA."
+        fi
+    fi
+    return 0
+}
+sync_git_identity
 
 # Already configured? A kinit wrapper calls this on every ticket, so a re-run
 # must be a silent no-op: units up and the ssh block present means nothing to do
@@ -111,37 +201,15 @@ fi
 
 # The VM-side uid. The same IPA uid on every enrolled host, but NOT this
 # workstation's local uid when the workstation is not itself enrolled (a plain
-# WSL box holds a ticket without an SSSD identity). So it is read from IPA with
-# the ticket we hold now, and a missing ticket is a hard stop, not a guess.
-# MIT klist labels it "Default principal:", Heimdal (macOS) says "Principal:",
-# so match the first user@realm in the output rather than a label, and cut at @.
-princ="$(klist 2>/dev/null | grep -oE '[[:alnum:]._-]+@[[:alnum:].-]+' | head -1 | cut -d@ -f1)"
+# WSL box holds a ticket without an SSSD identity). So it comes from the IPA
+# record read above, and a missing ticket or a failed login is a hard stop here,
+# not a guess.
 [ -n "$princ" ] || { echo "install-anchor.sh: no Kerberos ticket. Run kinit, then" >&2
     echo "  re-run: the VM-side uid is read from IPA and cannot be guessed." >&2; exit 2; }
-
-# The realm CA that pins the IPA lookup below. Linux enrolment leaves it at the
-# first path; setup-macos.sh saves it to the second, because a Mac has no
-# /etc/ipa and its curl may be Homebrew's, which ignores the System keychain the
-# CA was added to. An explicit --cacert on a file works whichever curl is first
-# on PATH; without it the lookup fails only on the Homebrew-curl Macs, which is
-# the intermittent "could not read a numeric uid" nobody could reproduce.
-# Kept as a bare path and expanded quoted: the macOS APPDIR has a space in it
-# ("Application Support"), so an unquoted "--cacert $path" splits into a bogus
-# CA file plus a stray URL and the login fails with a misleading "kinit" hint.
-CA=""
-for _ca in /etc/ipa/ca.crt "$APPDIR/realm-ca.crt"; do
-    [ -r "$_ca" ] && { CA="$_ca"; break; }
-done
-CJ="$(mktemp)"; trap 'rm -f "$CJ"' EXIT
-code="$(curl -sS -o /dev/null -w '%{http_code}' ${CA:+--cacert "$CA"} --negotiate -u : -c "$CJ" \
-    -H "Referer: $IPA_URL/ipa" "$IPA_URL/ipa/session/login_kerberos" 2>/dev/null || echo 000)"
 [ "$code" = 200 ] || { echo "install-anchor.sh: IPA login failed ($code) at $IPA_URL." >&2
     echo "  A valid ticket is needed to read your uid. kinit and retry." >&2; exit 2; }
-uid="$(curl -sS ${CA:+--cacert "$CA"} --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
-    -H 'Content-Type: application/json' -H 'Accept: application/json' \
-    -d '{"method":"user_show","params":[["'"$princ"'"],{"version":"2.251"}],"id":0}' \
-    "$IPA_URL/ipa/session/json" 2>/dev/null \
-    | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["result"]["result"]["uidnumber"][0])' 2>/dev/null || true)"
+uid="$("$PY" -c 'import json,sys; print(json.load(sys.stdin)["result"]["result"]["uidnumber"][0])' \
+    < "$IJ" 2>/dev/null || true)"
 case "$uid" in
     ''|*[!0-9]*) echo "install-anchor.sh: could not read a numeric uid for $princ from IPA." >&2; exit 2 ;;
 esac
