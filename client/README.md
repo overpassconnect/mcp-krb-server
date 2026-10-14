@@ -1144,13 +1144,29 @@ all three on every `kinit`, so an anchor set up before one of them existed is
 completed rather than left a socket short. `install-anchor.sh --uninstall`
 reverses it. The rest of this section is what that automates, done by hand.
 
-On every `kinit` it also sets git's global `user.email` to the address IPA has
-for you, and `user.name` from IPA if none is set. A commit carries whatever
-address git is configured with, and the forges credit it by that address, so
-this keeps your commits under your realm identity wherever you push them. The
-replaced address is kept under `mcp-krb.priorUserEmail` and `--uninstall` puts
-it back; a repository's own `user.email` still wins inside that repository. In
-WSL this is WSL's git; the Windows git configuration is not touched.
+On every `kinit` it also keeps your realm git identity current. A commit
+carries whatever name and address git is configured with, and the forges
+credit it by that address, so realm repositories should commit as the person
+IPA knows. The name and address IPA has for you go into
+`~/.config/mcp-krb/git-identity.gitconfig`, and one line in your global git
+config makes git read that file in any repository with a remote under
+`https://*.<domain>/` and nowhere else:
+
+```
+[includeIf "hasconfig:remote.*.url:https://*.example.internal/**"]
+	path = /home/you/.config/mcp-krb/git-identity.gitconfig
+```
+
+Your global `user.email` and `user.name` are left alone, so a personal address
+for GitHub stays personal, and a repository's own `user.email` still wins
+inside that repository. The include is kept after any `[user]` section, since
+git uses the last value it reads. It needs git 2.36 or later; an older git
+ignores it silently, so the anchor warns when it writes one. On Windows,
+`wslkinit` passes `--windows-git`, which copies the same file into
+`%USERPROFILE%\.config\mcp-krb\` and gives Windows git the same include,
+because a checkout on the Windows filesystem is committed to by either git.
+`--uninstall` removes all of it. An earlier version set the global
+`user.email` instead; the next `kinit` puts the address it replaced back.
 
 A shared dev host holds a *machine* keytab and no user ticket, by design:
 `ssh` runs with `GSSAPIDelegateCredentials no`, so nothing of yours is copied

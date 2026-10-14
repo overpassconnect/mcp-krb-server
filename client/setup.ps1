@@ -917,13 +917,14 @@ $kept += "function krb-git { wsl.exe --cd `"`$PWD`" -e krb-git @args }   # Kerbe
 # decides for itself whether anything is missing and is silent when nothing is,
 # so it is called every time rather than behind a guard here: a guard on one
 # unit name is exactly what left anchors a listener short when a third socket
-# was added.
+# was added. --windows-git has it give Windows git the realm identity too, not
+# only WSL's: a checkout on the Windows filesystem is committed to by either.
 #
 # There is no Windows equivalent to fall back on: this estate holds no tickets
 # outside WSL, so unlike ssh and git there is no native `kinit` these could
 # shadow. Naming them wsl* anyway keeps one rule for the whole set rather than
 # an exception to remember.
-$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm }; if (`$?) { wsl.exe -e sh -c '[ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url $McpBase/ --domain $Domain --ipa-url https://$Kdc' } }   # Kerberos kinit via WSL (setup.ps1)"
+$kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else { wsl.exe -e kinit $IpaUser@$Realm }; if (`$?) { wsl.exe -e sh -c '[ -x /opt/mcp-krb/install-anchor.sh ] && /opt/mcp-krb/install-anchor.sh --mcp-url $McpBase/ --domain $Domain --ipa-url https://$Kdc --windows-git' } }   # Kerberos kinit via WSL (setup.ps1)"
 $kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
 $kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii

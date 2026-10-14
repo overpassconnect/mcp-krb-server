@@ -10,13 +10,16 @@
 # listeners read is that person's.
 #
 #   sh install-anchor.sh --mcp-url URL --domain D --ipa-url URL [--dry-run]
+#                        [--windows-git]
 #
 # It is idempotent: re-running replaces the units and the ssh block in place.
 # On every run, including the silent ones once the anchor is up, it also keeps
-# git's global user.email equal to the address IPA has for the ticket holder.
+# the git identity of realm repositories equal to the ticket holder's IPA
+# record (see sync_git_identity). --windows-git, which setup.ps1's wslkinit
+# passes, does the same for the Windows git beside this WSL distro.
 set -eu
 
-MCP_URL=""; DOMAIN=""; IPA_URL=""; DRY=0; UNINSTALL=0; FORCE=0
+MCP_URL=""; DOMAIN=""; IPA_URL=""; DRY=0; UNINSTALL=0; FORCE=0; WINGIT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --mcp-url)   MCP_URL="$2"; shift 2 ;;
@@ -25,6 +28,7 @@ while [ $# -gt 0 ]; do
         --dry-run)   DRY=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --force)     FORCE=1; shift ;;
+        --windows-git) WINGIT=1; shift ;;
         *) echo "install-anchor.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -41,6 +45,72 @@ strip_ssh_block() {
     awk -v b="$BEGIN" -v e="$END" '
         $0==b {skip=1} skip && $0==e {skip=0; next} !skip {print}' "$_cfg" > "$_t"
     cat "$_t" > "$_cfg"; rm -f "$_t"; chmod 600 "$_cfg"
+}
+
+# The realm git identity: a file of this kit's own, and one includeIf in the
+# global config that makes git read it inside a repository with a remote under
+# https://*.DOMAIN/ and nowhere else. sync_git_identity below says why.
+IDFILE="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-krb/git-identity.gitconfig"
+
+# A string as a POSIX extended regex that matches only itself.
+ere_quote() { printf '%s\n' "$1" | sed 's/[][\.^$*+?(){}|]/\\&/g'; }
+
+# The global includeIf keys, as git $1 spells them, whose path is $2. Found by
+# value rather than by condition, so --uninstall needs no --domain. git.exe
+# ends its lines with CR.
+include_keys() {
+    "$1" config --global --no-includes --get-regexp '^includeif\..*\.path$' 2>/dev/null \
+        | tr -d '\r' | while read -r _k _v; do
+            [ "$_v" = "$2" ] && printf '%s\n' "$_k"
+        done | sort -u
+}
+
+# Remove git $1's global includeIf entries for path $2, and any section header
+# that leaves empty: an empty header keeps its place, and a later --add would
+# fill it there rather than at the end. Entries for other paths stay.
+drop_include() {
+    include_keys "$1" "$2" | while read -r _k; do
+        "$1" config --global --unset-all "$_k" "^$(ere_quote "$2")\$" >/dev/null 2>&1 || :
+        _sec="${_k%.path}"
+        "$1" config --global --no-includes --get-regexp "^$(ere_quote "$_sec")\." >/dev/null 2>&1 \
+            || "$1" config --global --remove-section "$_sec" >/dev/null 2>&1 || :
+    done
+}
+
+# Make git $1's global includeIf for path $2 present, with no user.email or
+# user.name after it. git keeps the last value it reads, so a [user] section
+# below the include (git config --global user.email appends one when the file
+# has none) would win inside realm repositories too; the entry is moved to the
+# end when that happens. Returns 0 when it changed something, 1 when it was
+# already in place; with --dry-run it only reports which.
+ensure_include() {
+    _want="includeif.hasconfig:remote.*.url:https://*.$DOMAIN/**.path=$2"
+    _in_place="$("$1" config --global --no-includes --list 2>/dev/null | tr -d '\r' | awk -v w="$_want" '
+        $0 == w { ok = 1; next }
+        /^user\.(email|name)=/ { ok = 0 }
+        END { print ok + 0 }')"
+    [ "$_in_place" = 1 ] && return 1
+    [ "$DRY" = 1 ] && return 0
+    drop_include "$1" "$2"
+    "$1" config --global --add "includeIf.hasconfig:remote.*.url:https://*.$DOMAIN/**.path" "$2"
+}
+
+# includeIf "hasconfig:remote.*.url:..." exists from git 2.36. An older git
+# skips the condition as unknown, and says nothing.
+reads_hasconfig() {
+    _v="$("$1" version 2>/dev/null | tr -d '\r' | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')"
+    set -- $_v
+    [ "${1:-0}" -gt 2 ] || { [ "${1:-0}" -eq 2 ] && [ "${2:-0}" -ge 36 ]; }
+}
+
+# The Windows user's profile directory as C:/Users/name, asked of cmd.exe over
+# WSL interop. Fails when interop is off or the answer is not a drive path.
+win_home() {
+    _h="$(cmd.exe /c echo %USERPROFILE% 2>/dev/null | tr -d '\r')"
+    case "$_h" in
+        [A-Za-z]:\\*) printf '%s\n' "$_h" | tr '\\' '/' ;;
+        *) return 1 ;;
+    esac
 }
 
 # Teardown is the exact inverse of what install writes, and needs none of the
@@ -62,7 +132,17 @@ if [ "$UNINSTALL" = 1 ]; then
     esac
     strip_ssh_block
     rm -f "$HOME/.mcp-krb.sock" "$HOME/.mcp-krb-fetch.sock" "$HOME/.mcp-krb-git.sock"
-    # Put back the git address the identity sync replaced, if it replaced one.
+    if command -v git >/dev/null 2>&1; then
+        drop_include git "$IDFILE"
+    fi
+    rm -f "$IDFILE"; rmdir "$(dirname "$IDFILE")" 2>/dev/null || :
+    if [ "$WINGIT" = 1 ] && command -v git.exe >/dev/null 2>&1 && _wh="$(win_home)"; then
+        drop_include git.exe "$_wh/.config/mcp-krb/git-identity.gitconfig"
+        _wf="$(wslpath -u "$_wh/.config/mcp-krb/git-identity.gitconfig" 2>/dev/null || :)"
+        if [ -n "$_wf" ]; then rm -f "$_wf"; rmdir "$(dirname "$_wf")" 2>/dev/null || :; fi
+    fi
+    # An earlier version set the global user.email itself and kept the address
+    # it replaced under mcp-krb.priorUserEmail. Put that back if it is there.
     if command -v git >/dev/null 2>&1 \
             && git config --global --get mcp-krb.priorUserEmail >/dev/null 2>&1; then
         _prior="$(git config --global --get mcp-krb.priorUserEmail)"
@@ -71,7 +151,7 @@ if [ "$UNINSTALL" = 1 ]; then
         git config --global --unset mcp-krb.priorUserEmail || :
         echo "anchor: git user.email restored to ${_prior:-unset}."
     fi
-    echo "anchor: removed units/agents, the ssh block, and the sockets."
+    echo "anchor: removed units/agents, the ssh block, the sockets and the realm git identity."
     exit 0
 fi
 
@@ -116,29 +196,36 @@ done
 
 # This person's IPA record: one Kerberos login and one user_show, on every run.
 # Two readers use it: the git identity just below, refreshed on every ticket,
-# and the uid further down, needed only while the anchor is being set up.
+# and the uid further down, needed only while the anchor is being set up. Every
+# kinit waits on these two, so both are bounded: a slow IPA costs seconds.
 CJ="$(mktemp)"; IJ="$(mktemp)"; trap 'rm -f "$CJ" "$IJ"' EXIT
 code=000
 if [ -n "$princ" ]; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' ${CA:+--cacert "$CA"} --negotiate -u : -c "$CJ" \
+    code="$(curl -sS --connect-timeout 5 --max-time 20 -o /dev/null -w '%{http_code}' \
+        ${CA:+--cacert "$CA"} --negotiate -u : -c "$CJ" \
         -H "Referer: $IPA_URL/ipa" "$IPA_URL/ipa/session/login_kerberos" 2>/dev/null || echo 000)"
     if [ "$code" = 200 ]; then
-        curl -sS ${CA:+--cacert "$CA"} --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
+        curl -sS --connect-timeout 5 --max-time 20 \
+            ${CA:+--cacert "$CA"} --negotiate -u : -b "$CJ" -H "Referer: $IPA_URL/ipa" \
             -H 'Content-Type: application/json' -H 'Accept: application/json' \
             -d '{"method":"user_show","params":[["'"$princ"'"],{"version":"2.251"}],"id":0}' \
             "$IPA_URL/ipa/session/json" > "$IJ" 2>/dev/null || :
     fi
 fi
 
-# The git identity follows IPA. A commit carries whatever address git is
-# configured with, the forges credit it by that address, and a push through
-# Gitea and its mirror changes nothing in it; so the global user.email is kept
-# equal to the address IPA has for this person, and user.name is filled from IPA
-# only where none is set. A repository's own user.email (git config without
-# --global) still wins inside that repository. The address it replaces is kept
-# once, under mcp-krb.priorUserEmail, for --uninstall to put back. Silent unless
-# it changes something, and never fatal: a ticket must not fail because IPA was
-# slow to answer, and the kinit wrappers return this script's status.
+# The git identity follows IPA, inside realm repositories only. A commit
+# carries whatever name and address git is configured with, the forges credit
+# it by that address, and a push through Gitea and its mirror changes nothing
+# in it. So the name and address IPA has for this person are written to
+# $IDFILE, and one includeIf in the global config makes git read that file in a
+# repository with a remote under https://*.DOMAIN/. The global user.email and
+# user.name, which every other repository uses, are not touched: a personal
+# address for GitHub stays personal. A repository's own user.email (git config
+# without --global) still wins inside it.
+#
+# Silent unless it changes something, and never fatal: a ticket must not fail
+# because IPA was slow to answer, and the kinit wrappers return this script's
+# status.
 sync_git_identity() {
     command -v git >/dev/null 2>&1 || return 0
     [ -s "$IJ" ] || return 0
@@ -152,23 +239,89 @@ print(" ".join(x for x in (first("givenname"), first("sn")) if x))
     _mail="$(printf '%s\n' "$_id" | sed -n 1p)"
     _name="$(printf '%s\n' "$_id" | sed -n 2p)"
     case "$_mail" in *@*.*) ;; *) return 0 ;; esac
-    _cur="$(git config --global user.email 2>/dev/null || :)"
-    if [ "$_cur" != "$_mail" ]; then
+    _who="${_name:+$_name }<$_mail>"
+
+    # An earlier version of this step set the global user.email itself and kept
+    # the address it replaced under mcp-krb.priorUserEmail. Undo that, unless
+    # the global address has been changed by hand since.
+    if git config --global --get mcp-krb.priorUserEmail >/dev/null 2>&1; then
+        _prior="$(git config --global --get mcp-krb.priorUserEmail || :)"
         if [ "$DRY" = 1 ]; then
-            echo "would: set git user.email to $_mail, the address IPA has for $princ"
+            echo "would: put the global git user.email back to ${_prior:-unset}"
         else
-            git config --global --get mcp-krb.priorUserEmail >/dev/null 2>&1 \
-                || git config --global mcp-krb.priorUserEmail "$_cur" || :
-            git config --global user.email "$_mail" \
-                && echo "git: user.email set to $_mail, the address IPA has for $princ."
+            if [ "$(git config --global user.email 2>/dev/null || :)" = "$_mail" ]; then
+                if [ -n "$_prior" ]; then git config --global user.email "$_prior" || :
+                else git config --global --unset user.email || :; fi
+                echo "git: global user.email put back to ${_prior:-unset}; $_mail is for realm repositories only now."
+            fi
+            git config --global --unset mcp-krb.priorUserEmail || :
         fi
     fi
-    if [ -n "$_name" ] && [ -z "$(git config --global user.name 2>/dev/null || :)" ]; then
+
+    _changed=0
+    if [ "$(git config -f "$IDFILE" user.email 2>/dev/null || :)" != "$_mail" ] \
+            || [ "$(git config -f "$IDFILE" user.name 2>/dev/null || :)" != "$_name" ]; then
+        _changed=1
         if [ "$DRY" = 1 ]; then
-            echo "would: set git user.name to $_name (none was set)"
+            echo "would: write $_who to $IDFILE"
         else
-            git config --global user.name "$_name" && echo "git: user.name set to $_name from IPA."
+            mkdir -p "$(dirname "$IDFILE")" || return 0
+            {   echo "# Written by mcp-krb install-anchor.sh from your IPA record on every kinit."
+                echo "# git reads it only in repositories with a remote under https://*.$DOMAIN/."
+            } > "$IDFILE.tmp" || return 0
+            git config -f "$IDFILE.tmp" user.email "$_mail" || return 0
+            if [ -n "$_name" ]; then git config -f "$IDFILE.tmp" user.name "$_name" || return 0; fi
+            mv -f "$IDFILE.tmp" "$IDFILE" || return 0
         fi
+    fi
+    if ensure_include git "$IDFILE"; then
+        _changed=1
+        if [ "$DRY" = 1 ]; then
+            echo "would: add an includeIf for https://*.$DOMAIN/ at the end of the global git config"
+        fi
+    fi
+    if [ "$_changed" = 1 ] && [ "$DRY" != 1 ]; then
+        echo "git: repositories under https://*.$DOMAIN/ commit as $_who, as IPA has it for $princ."
+        reads_hasconfig git || echo "git: WARNING: $(git version) predates includeIf hasconfig (2.36) and ignores it. Upgrade git, or set user.email in each realm repository." >&2
+    fi
+    if [ "$WINGIT" = 1 ]; then sync_windows_git "$_changed" "$_who"; fi
+    return 0
+}
+
+# The Windows git beside this distro reads its own global config, and a checkout
+# on the Windows filesystem gets commits from either git. So with --windows-git
+# the same file is copied into the Windows profile and git.exe, over WSL
+# interop, is given the same includeIf. $1 is 1 when the identity changed in
+# this run: a Windows side that cannot be reached is reported then, not on
+# every kinit.
+sync_windows_git() {
+    command -v git.exe >/dev/null 2>&1 || return 0
+    if ! _wh="$(win_home)" \
+            || ! _wf="$(wslpath -u "$_wh/.config/mcp-krb/git-identity.gitconfig" 2>/dev/null)"; then
+        if [ "$1" = 1 ]; then
+            echo "git (Windows): WARNING: Windows is not reachable over WSL interop, so Windows git keeps its own identity." >&2
+        fi
+        return 0
+    fi
+    _wi="$_wh/.config/mcp-krb/git-identity.gitconfig"
+    _wchanged=0
+    if ! cmp -s "$IDFILE" "$_wf"; then
+        _wchanged=1
+        if [ "$DRY" = 1 ]; then
+            echo "would: copy $IDFILE to $_wi for Windows git"
+        else
+            mkdir -p "$(dirname "$_wf")" && cp -f "$IDFILE" "$_wf" || return 0
+        fi
+    fi
+    if ensure_include git.exe "$_wi"; then
+        _wchanged=1
+        if [ "$DRY" = 1 ]; then
+            echo "would: add an includeIf for https://*.$DOMAIN/ at the end of Windows git's global config"
+        fi
+    fi
+    if [ "$_wchanged" = 1 ] && [ "$DRY" != 1 ]; then
+        echo "git (Windows): repositories under https://*.$DOMAIN/ commit as $2."
+        reads_hasconfig git.exe || echo "git (Windows): WARNING: $(git.exe version | tr -d '\r') predates includeIf hasconfig (2.36) and ignores it. Upgrade Git for Windows." >&2
     fi
     return 0
 }
