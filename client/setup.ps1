@@ -869,7 +869,7 @@ if (-not (Test-Path $profilePath)) {
 # current name would leave that stale `kssh` working forever, updated by
 # nothing. Removing the retired name is the point of listing it: do not drop
 # `kssh` here.
-$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|krb-fetch|mcp-fetch|krb-git|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
+$kept = @(@(Get-Content -Path $profilePath) | Where-Object { $_ -notmatch '^\s*function\s+(wslssh|kssh|krb-fetch|mcp-fetch|krb-git|krb-put|wslgit|wslkinit|wslklist|wslkdestroy)\b' })
 $kept += "function wslssh { wsl.exe -e ssh @args }   # Kerberos ssh via WSL (setup.ps1)"
 # Same reasoning as wslssh, one addition: git is directory-sensitive where ssh is
 # not, so this carries --cd. $PWD is the Windows working directory and wsl.exe
@@ -902,6 +902,11 @@ $kept += "function mcp-fetch { krb-fetch @args }   # Kerberos fetch, old name, v
 # here so that the one name learned on a shared host also works at home, and
 # carries --cd for the same reason wslgit does.
 $kept += "function krb-git { wsl.exe --cd `"`$PWD`" -e krb-git @args }   # Kerberos krb-git via WSL (setup.ps1)"
+# krb-put runs in WSL for the same reason krb-fetch does, and its source path has
+# the same boundary to cross: C:\reports\kit is translated here, so the spelling
+# a Windows user naturally types does what they meant. One line, as krb-fetch's
+# is, because the profile is kept idempotent by matching whole `function` lines.
+$kept += "function krb-put { `$a=@(`$args); if(`$a.Count -gt 0 -and `$a[0] -match '^[A-Za-z]:[\\/]'){ `$a[0]=(wsl.exe -e wslpath -u `$a[0]).Trim() }; wsl.exe --cd `"`$PWD`" -e krb-put @a }   # Kerberos put via WSL (setup.ps1)"
 # The three ticket verbs. Everything above is a consumer of a ticket; these are
 # how you get one, look at it and drop it, so they are the commands actually
 # typed daily and the ones worth not typing in full.
@@ -928,7 +933,7 @@ $kept += "function wslkinit { if (`$args.Count) { wsl.exe -e kinit @args } else 
 $kept += "function wslklist { wsl.exe -e klist @args }   # Kerberos klist via WSL (setup.ps1)"
 $kept += "function wslkdestroy { wsl.exe -e kdestroy @args }   # Kerberos kdestroy via WSL (setup.ps1)"
 Set-Content -Path $profilePath -Value $kept -Encoding ascii
-Say 'PowerShell: wslssh, wslgit, krb-fetch (and mcp-fetch, its old name), krb-git, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
+Say 'PowerShell: wslssh, wslgit, krb-fetch (and mcp-fetch, its old name), krb-git, krb-put, wslkinit, wslklist and wslkdestroy functions added (your `ssh` and `git` are left untouched)'
 
 # Windows git defaults to core.autocrlf=true and WSL git to false. With the
 # checkout on the Windows filesystem BOTH act on one worktree, so each sees files

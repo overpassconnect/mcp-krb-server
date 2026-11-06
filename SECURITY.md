@@ -504,6 +504,15 @@ The refusal is a KDC `KDC_ERR_BADOPTION`, reported by the server as
 `kdc-badoption:check-rule-target-and-caller-forwardable`, which names both
 suspects because it cannot tell them apart.
 
+`krb-put` sends a file or folder to a WebDAV folder with the user's own ticket, so
+a path or URL that came from model output can publish a local file to any realm
+host the user could write to by hand. The rules are the ones `--fetch` has, https
+and realm hosts only with no redirect followed, plus what a write needs: a
+symlink anywhere in the source stops the run before a packet moves, nothing is
+written over without `--replace`, nothing at the destination is ever deleted, and
+the destination must already exist. It runs only where the ticket is, so the
+forwarded socket gives a shared host no way to send.
+
 The git relay (`--git-listen`, used by `krb-git` from a host with no ticket)
 keeps the same posture with one more surface, because it is an HTTP proxy that
 git talks to. Every request git makes to it is re-issued from the workstation

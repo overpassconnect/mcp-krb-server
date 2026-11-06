@@ -21,7 +21,8 @@ SHELL = sorted(
     # glob written for scripts. It is shipped and run like the rest, so it is
     # checked like the rest.
     + [ROOT / "client" / "bridge" / "krb-fetch", ROOT / "client" / "bridge" / "mcp-fetch",
-       ROOT / "client" / "bridge" / "krb-git"]
+       ROOT / "client" / "bridge" / "krb-git",
+       ROOT / "client" / "bridge" / "krb-put"]
 )
 
 # A backslash-n with whitespace in front is a continuation someone flattened.

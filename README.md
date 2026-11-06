@@ -30,7 +30,7 @@ put your tools in one site file that this repository never carries.
 |---|---|---|---|
 | **The server** | a Kerberised MCP server on the official Python SDK, behind nginx. Every request is authenticated offline by SPNEGO against a keytab; every tool call is authorized deny-by-default by FreeIPA group; every decision is an audit line. Optional: a tool may act downstream as the caller (constrained delegation), and a browser editor for the policy (pictured) | one Linux host in the realm | `server/` |
 | **Its installer** | one script that creates the service account, venv, keytab, systemd unit, nginx vhost and certificate, then publishes the client kit; a read-only verifier that checks the result | the same host | `server/install/` |
-| **The client kit** | a stdio bridge that mints a fresh Negotiate token per request, the `mcp-krb` launcher an MCP client is pointed at, `krb-fetch` for byte-exact files and `krb-git` for git over Kerberos, and the reverse bridge: a shared dev host that holds no ticket uses your workstation's through a socket forwarded by `ssh -R` | every workstation and shared dev host | `client/bridge/` |
+| **The client kit** | a stdio bridge that mints a fresh Negotiate token per request, the `mcp-krb` launcher an MCP client is pointed at, `krb-fetch` for byte-exact files, `krb-put` for sending files and folders and `krb-git` for git over Kerberos, and the reverse bridge: a shared dev host that holds no ticket uses your workstation's through a socket forwarded by `ssh -R` | every workstation and shared dev host | `client/bridge/` |
 | **Workstation provisioning** | `setup.sh` (Linux: enrol, then install), `setup.ps1` (Windows without domain join: WSL2, Kerberos ssh, VS Code Remote-SSH, a browser that can SSO, the bridge), `setup-macos.sh`, uninstallers driven by install manifests, and a provisioning web page the installer serves | workstations | `client/`, `client/web/` |
 
 Your own tools go in one Python file, loaded through `MCP_SITE_TOOLS`, each
@@ -213,10 +213,10 @@ without holding your TGT, requires an identity the realm knows and rules it
 enforces. A shell script cannot be granted that, and should not be.
 
 **And the corollary:** things you could already do belong in the shell, not
-behind a tool. `krb-fetch` and `krb-git` are deliberately **not** MCP tools. The
-assistant already has your ticket, so wrapping an HTTP GET or a `git pull` in a
-server call would add a hop, a schema and an audit line while changing nothing
-about what is possible.
+behind a tool. `krb-fetch`, `krb-put` and `krb-git` are deliberately **not** MCP
+tools. The assistant already has your ticket, so wrapping an HTTP request or a
+`git pull` in a server call would add a hop, a schema and an audit line while
+changing nothing about what is possible.
 The test each tool should pass is: *could the caller do this themselves, unlogged,
 if the tool did not exist?* When the answer is yes, it does not belong here.
 
@@ -698,6 +698,7 @@ client/          # everything that runs on a workstation
     krb-fetch          - fetch one URL byte-exact, over whichever of the two applies
     mcp-fetch          - krb-fetch's former name: a shim that runs it, kept so the name still works
     krb-git            - git through the same choice: Negotiate itself on a workstation, relayed on a shared host
+    krb-put            - send a file or folder into a WebDAV folder, checked on arrival, where the ticket is
     examples/          - mcp.json, mcp.json.windows, managed-mcp.json
 tests/           # hermetic unit tests (fake gssapi, no KDC needed)
   run-tests.sh, python/

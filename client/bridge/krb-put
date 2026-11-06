@@ -1,0 +1,67 @@
+#!/bin/sh
+# krb-put - send a file or folder into a WebDAV folder over Kerberos.
+#
+# The other direction from krb-fetch, for the same reason: the bytes go from
+# disk to the server without passing through a model, and they are checked when
+# they get there. Deliberately NOT an MCP tool, as krb-fetch's header explains.
+# Plain WebDAV, so it works with any realm host that speaks it.
+#
+#   krb-put kit https://host.example.internal/dav/files/me/Reports/
+#   krb-put kit https://host.example.internal/dav/files/me/Reports/ --replace
+#
+# The file or folder keeps its name inside the destination folder, which must
+# already exist. It refuses what krb-fetch refuses, a symlink anywhere in the
+# folder, and writing over anything without --replace. The run succeeds only
+# after the server has reported every name and size that was sent.
+#
+# Exit codes match the bridge: 0 ok, 2 no Kerberos, 3 HTTP, 4 the server does
+# not hold what was sent, 5 refused by policy.
+#
+# This one runs where the ticket is. Sending from a shared host through the
+# forwarded socket is not built, so on such a host it says so, rather than
+# leaving someone to answer "no credentials" with a kinit that does not belong
+# there.
+set -eu
+
+SOCKET="${MCP_KRB_GIT_SOCKET:-/run/user/$(id -u)/mcp-krb-git.sock}"
+
+# MCP_KRB_HOME is an override, so it is obeyed exactly: pointing it somewhere
+# empty is an error, not a reason to quietly use the system install.
+if [ -n "${MCP_KRB_HOME:-}" ]; then
+    APPDIR="$MCP_KRB_HOME"
+    if [ ! -f "$APPDIR/mcp-krb-bridge.py" ]; then
+        echo "krb-put: MCP_KRB_HOME=$APPDIR holds no bridge." >&2
+        exit 2
+    fi
+else
+    APPDIR=""
+    for _d in /opt/mcp-krb "$HOME/Library/Application Support/mcp-krb"; do
+        if [ -f "$_d/mcp-krb-bridge.py" ]; then
+            APPDIR="$_d"
+            break
+        fi
+    done
+    if [ -z "$APPDIR" ]; then
+        echo "krb-put: no bridge installed. Looked in /opt/mcp-krb and" >&2
+        echo "  \$HOME/Library/Application Support/mcp-krb. Set MCP_KRB_HOME to" >&2
+        echo "  point at another directory." >&2
+        exit 2
+    fi
+fi
+
+if [ -S "$SOCKET" ]; then
+    echo "krb-put: this is a shared host, which holds no ticket and should not get" >&2
+    echo "  one, and sending through the forwarded socket is not built. Run it on" >&2
+    echo "  your workstation." >&2
+    exit 2
+fi
+
+# macOS installs into a venv because python-gssapi is not a system package
+# there; Linux gets it from ipa-client and uses the system interpreter.
+if [ -x "$APPDIR/venv/bin/python3" ]; then
+    PY="$APPDIR/venv/bin/python3"
+else
+    PY=python3
+fi
+
+exec "$PY" "$APPDIR/mcp-krb-bridge.py" --put "$@"
