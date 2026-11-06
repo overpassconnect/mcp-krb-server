@@ -21,6 +21,7 @@ anywhere.
 | `krb-fetch` | fetch one URL byte-exact; picks between the two above | `install-bridge.sh` |
 | `mcp-fetch` | `krb-fetch`'s former name: a shim that runs it, kept so the name still works | `install-bridge.sh` |
 | `krb-git` | git over Kerberos, through the same choice: git's own Negotiate on a workstation, relayed on a shared host | `install-bridge.sh` |
+| `krb-put` | send a file or folder into a WebDAV folder, checked on arrival; where the ticket is | `install-bridge.sh` |
 
 ### The MCP host serves them
 
@@ -1087,6 +1088,48 @@ On Windows the command is a PowerShell function, because the ticket lives in
 WSL. It translates an absolute `-o C:\...` with `wslpath -u` before handing it
 over; relative paths need no help, since `wsl.exe` inherits the working
 directory.
+
+## Sending a file or folder: `krb-put`
+
+The other direction from `krb-fetch`, for the same reason: the bytes go from
+disk to the server and never through a model as text.
+
+```
+krb-put report.pdf https://host.example.internal/dav/files/me/Reports/
+krb-put kit        https://host.example.internal/dav/files/me/Reports/
+krb-put kit        https://host.example.internal/dav/files/me/Reports/ --replace
+```
+
+The file or folder keeps its name inside the destination folder, empty folders
+included. It speaks plain WebDAV (`PROPFIND`, `MKCOL`, `PUT`), so it works with
+any realm host that does, and it streams from disk, so it has no size limit of
+its own. One run uses one connection and one cookie jar: a server that opens a
+session per authenticated request, as Nextcloud does, sees one session rather
+than one per file.
+
+A run succeeds only after the server has been asked what it now holds and has
+reported every name and size that was sent. Exit codes: `0` ok, `2` no Kerberos,
+`3` HTTP, `4` the server does not hold what was sent, `5` refused.
+
+A run that stops partway leaves what it sent, and `--replace` sends it all
+again. Nothing at the destination is ever deleted, so `--replace` onto a folder
+keeps whatever else is in it.
+
+| refused | because |
+|---|---|
+| `http://`, a host outside the realm suffix, any 3xx | as for `krb-fetch` |
+| a destination that does not exist or is not a folder | a typing mistake in a URL has to fail, not grow a tree somewhere nobody looks |
+| a name that already exists there | `--replace` if meant |
+| a symlink anywhere in what is sent | what it points at may sit outside the folder you named, which is how a file nobody chose gets published |
+| a path like `C:\tmp\kit` off Windows | inside WSL it names nothing |
+
+On Windows the command is a PowerShell function, because the ticket lives in
+WSL. It translates an absolute source path with `wslpath -u`; relative paths need
+no help, since `wsl.exe` inherits the working directory.
+
+It runs where the ticket is. Sending from a shared host through the forwarded
+socket is not built, so on such a host it says so and stops, rather than leaving
+someone to answer "no credentials" with a `kinit` that does not belong there.
 
 ## Git: `krb-git`
 

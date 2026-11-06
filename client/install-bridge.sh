@@ -70,6 +70,8 @@ FETCH="krb-fetch"
 FETCH_LINK="/usr/local/bin/krb-fetch"
 GIT="krb-git"
 GIT_LINK="/usr/local/bin/krb-git"
+PUT="krb-put"
+PUT_LINK="/usr/local/bin/krb-put"
 # The name krb-fetch had before: a shim that runs krb-fetch, installed and
 # linked exactly as the real one was, so an earlier install's link and anyone's
 # notes keep working.
@@ -315,7 +317,7 @@ fetch_retry() {
     return 1
 }
 
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$LAUNCH" "$ANCHOR"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$PUT" "$LAUNCH" "$ANCHOR"; do
     fetch_retry "$f" "$tmp/$f" || {
         echo "ERROR: could not fetch $BASE/$f - nothing was installed." >&2
         echo "  If this ran as part of enrolment, the IPA join may have SUCCEEDED while" >&2
@@ -331,12 +333,12 @@ done
 # created may be recorded as removable in the manifest.
 DEST_EXISTED=0; [ -d "$DEST" ] && DEST_EXISTED=1
 $SUDO mkdir -p "$DEST"
-for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$LAUNCH" "$ANCHOR"; do
+for f in "$BRIDGE" "$REMOTE" "$FETCH" "$FETCH_OLD" "$GIT" "$PUT" "$LAUNCH" "$ANCHOR"; do
     $SUDO install -m 0755 "$tmp/$f" "$DEST/$f"
 done
 
-# krb-fetch and krb-git are commands people type, so they go on PATH, and so
-# does the old name. A symlink rather than a copy: each wrapper locates its
+# krb-fetch, krb-git and krb-put are commands people type, so they go on PATH,
+# and so does the old name. A symlink rather than a copy: each wrapper locates its
 # siblings by directory, and two copies drifting apart is the failure this
 # avoids. Only a link this run created is recorded as removable, so an existing
 # command belonging to something else survives uninstall. put_on_path <wrapper>
@@ -360,6 +362,7 @@ put_on_path() {
 FETCH_LINKED="$(put_on_path "$FETCH" "$FETCH_LINK")"
 FETCH_OLD_LINKED="$(put_on_path "$FETCH_OLD" "$FETCH_OLD_LINK")"
 GIT_LINKED="$(put_on_path "$GIT" "$GIT_LINK")"
+PUT_LINKED="$(put_on_path "$PUT" "$PUT_LINK")"
 
 python3 -c 'import gssapi' 2>/dev/null || \
     echo "WARNING: python3-gssapi not found - is this machine ipa-client-enrolled?" >&2
@@ -390,10 +393,11 @@ fi
 # path below is script-literal, which is what makes building the JSON by
 # concatenation safe. Non-fatal on failure, but loud: an install without a
 # manifest still works today and cannot be cleanly uninstalled tomorrow.
-FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$FETCH_OLD\", \"$DEST/$GIT\", \"$DEST/$LAUNCH\", \"$DEST/$ANCHOR\""
+FRAG_CREATED="\"$DEST/$BRIDGE\", \"$DEST/$REMOTE\", \"$DEST/$FETCH\", \"$DEST/$FETCH_OLD\", \"$DEST/$GIT\", \"$DEST/$PUT\", \"$DEST/$LAUNCH\", \"$DEST/$ANCHOR\""
 [ "$FETCH_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_LINK\""
 [ "$FETCH_OLD_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$FETCH_OLD_LINK\""
 [ "$GIT_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$GIT_LINK\""
+[ "$PUT_LINKED" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$PUT_LINK\""
 [ "$MANAGED_WROTE" = 1 ] && FRAG_CREATED="$FRAG_CREATED, \"$MANAGED_FILE\""
 FRAG_DIRS=""
 [ "$DEST_EXISTED" = 0 ] && FRAG_DIRS="\"$DEST\""

@@ -48,7 +48,9 @@ import stat
 import struct
 import subprocess
 import tempfile
-from urllib.parse import urlsplit
+import unicodedata
+import xml.etree.ElementTree as ET
+from urllib.parse import quote, unquote, urlsplit
 
 
 def log(*parts):
@@ -484,6 +486,286 @@ def fetch_to_file(url, dest, sha256=None, max_bytes=DEFAULT_MAX_BYTES,
             except OSError:
                 pass
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sending a file or folder, the other direction from --fetch.
+#
+# Plain WebDAV (PROPFIND, MKCOL, PUT), so it works with any realm host that
+# speaks it and knows nothing about any one server. The URL arrives from model
+# output as often as --fetch's does, so it meets the same rules: https only,
+# realm hosts only, no redirects. A write adds two of its own. Nothing is
+# written over unless the caller said so, and a run is a success only once the
+# server has been asked what it now holds and has answered with every name and
+# size that was sent.
+# ---------------------------------------------------------------------------
+
+_DAV = '{DAV:}'
+
+
+class PutMismatch(Exception):
+    """The server does not hold what was sent. Exit 4."""
+
+
+def _check_put_url(url, host_suffix):
+    u = _check_url(url, host_suffix)
+    if u.query or u.fragment:
+        raise FetchRefused('a folder URL has no query or fragment: %s' % url)
+    return u
+
+
+def _put_name(name, where):
+    """A local name as it is sent and compared. NFC, because macOS stores names
+    decomposed and a server that keeps them composed would otherwise report a
+    different name for the same file."""
+    try:
+        name.encode('utf-8')
+    except UnicodeEncodeError:
+        raise FetchRefused('a name in %s is not valid UTF-8, so no URL can carry it: %r'
+                           % (where, name))
+    return unicodedata.normalize('NFC', name)
+
+
+def _put_plan(source):
+    """What the send consists of, settled before a single packet moves.
+
+    Returns (name, folders, files): the name it takes at the destination, the
+    folders in creation order, and (path, local path, size) per file, every path
+    relative to the destination. A symlink anywhere is refused rather than
+    followed: what it points at may sit outside the folder the caller named, and
+    that is how a file nobody chose gets published."""
+    if os.name != 'nt' and _WINDOWS_PATH.match(source):
+        raise FetchRefused('%s looks like a Windows path, which names nothing inside '
+                           'WSL. Use a relative path, or translate it with `wslpath -u`.'
+                           % source)
+    root = os.path.abspath(source)
+    if os.path.islink(root):
+        raise FetchRefused('%s is a symlink; refusing to send through it' % source)
+    name = _put_name(os.path.basename(root), source)
+    if not name:
+        raise FetchRefused('%s has no name to give it at the destination' % source)
+    folders, files = [], []
+
+    def walk(path, rel):
+        with os.scandir(path) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for e in entries:
+            child = rel + '/' + _put_name(e.name, path)
+            if e.is_symlink():
+                raise FetchRefused('%s is a symlink; refusing to send through it' % e.path)
+            if e.is_dir(follow_symlinks=False):
+                folders.append(child)
+                walk(e.path, child)
+            elif e.is_file(follow_symlinks=False):
+                files.append((child, e.path, e.stat(follow_symlinks=False).st_size))
+            else:
+                raise FetchRefused('%s is neither a file nor a folder' % e.path)
+
+    try:
+        if os.path.isdir(root):
+            folders.append(name)
+            walk(root, name)
+        elif os.path.isfile(root):
+            files.append((name, root, os.path.getsize(root)))
+        else:
+            raise FetchRefused('no such file or folder: %s' % source)
+    except OSError as exc:
+        raise FetchRefused('cannot read %s: %s' % (source, exc))
+    return name, folders, files
+
+
+def _file_chunks(path, size):
+    """The planned number of bytes, from disk, without holding the file in
+    memory. A file that shrinks under the send cannot honour the Content-Length
+    already promised, so that ends the run here."""
+    left = size
+    with open(path, 'rb') as fh:
+        while left:
+            chunk = fh.read(min(left, 65536))
+            if not chunk:
+                raise PutMismatch('%s shrank while it was being sent' % path)
+            left -= len(chunk)
+            yield chunk
+
+
+class _Dav:
+    """One host, one connection and one set of cookies for the whole run.
+
+    The cookies are what keep a run to one session on a server that opens a
+    session per authenticated request, as Nextcloud does: without them a folder
+    of sixty files leaves sixty sessions behind. A fresh Negotiate header still
+    goes on every request, so nothing depends on a cookie being honoured, and a
+    plain dict is enough because the run never talks to a second host. Not
+    urllib's cookie machinery: this file keeps urllib.request out on purpose,
+    because it follows redirects."""
+
+    def __init__(self, url, cafile=None):
+        u = urlsplit(url)
+        self.host, self.port = u.hostname, u.port or 443
+        self.context = ssl.create_default_context(cafile=cafile)
+        self.cookies = {}
+        self.conn = None
+
+    def close(self):
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+
+    def _keep_cookies(self, resp):
+        for key, value in resp.getheaders():
+            if key.lower() != 'set-cookie':
+                continue
+            pair, _, attributes = value.partition(';')
+            name, _, content = pair.strip().partition('=')
+            if 'max-age=0' in attributes.lower() or content == 'deleted':
+                self.cookies.pop(name, None)
+            elif name:
+                self.cookies[name] = content
+
+    def request(self, method, path, chunks=None, headers=None):
+        """One request, returning (status, body). `chunks` is a function giving
+        a fresh iterable of the request body, so a keep-alive connection the
+        server dropped between requests can be retried once."""
+        sent = {'User-Agent': 'krb-put'}
+        sent.update(headers or {})
+        if self.cookies:
+            sent['Cookie'] = '; '.join('%s=%s' % c for c in self.cookies.items())
+        for attempt in (1, 2):
+            auth = negotiate_header(self.host)
+            if auth:
+                sent['Authorization'] = auth
+            if self.conn is None:
+                self.conn = http.client.HTTPSConnection(self.host, self.port,
+                                                        context=self.context, timeout=600)
+            try:
+                self.conn.request(method, path, body=chunks() if chunks else None,
+                                  headers=sent)
+                resp = self.conn.getresponse()
+                body = resp.read()
+                break
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError):
+                self.close()
+                if attempt == 2:
+                    raise
+        self._keep_cookies(resp)
+        if 300 <= resp.status < 400:
+            raise FetchRefused('refusing to follow a %d redirect from %s %s'
+                               % (resp.status, method, unquote(path)))
+        return resp.status, body
+
+
+def _dav_entries(xml_body):
+    """[(path, is_folder, size or None)] from a 207 multistatus body, paths
+    decoded. Only properties the server answered 200 for are believed: a
+    property listed as missing is not a size of nothing."""
+    entries = []
+    for response in ET.fromstring(xml_body).findall(_DAV + 'response'):
+        href = response.findtext(_DAV + 'href') or ''
+        is_folder, size = False, None
+        for propstat in response.findall(_DAV + 'propstat'):
+            if ' 200 ' not in (propstat.findtext(_DAV + 'status') or '') + ' ':
+                continue
+            prop = propstat.find(_DAV + 'prop')
+            if prop is None:
+                continue
+            if prop.find(_DAV + 'resourcetype/' + _DAV + 'collection') is not None:
+                is_folder = True
+            length = (prop.findtext(_DAV + 'getcontentlength') or '').strip()
+            if length.isdigit():
+                size = int(length)
+        entries.append((unquote(urlsplit(href).path).rstrip('/'), is_folder, size))
+    return entries
+
+
+def _dav_path(base, rel):
+    return base + '/'.join(quote(part, safe='') for part in rel.split('/'))
+
+
+def _put_verify(dav, base, folders, files):
+    """Ask the server what it holds, folder by folder, and compare every name
+    and size with what was sent. Names it holds beyond those are left out of the
+    comparison: with --replace they are the rest of a folder that already had
+    something in it."""
+    wanted = {}
+    for rel in folders:
+        parent, _, leaf = rel.rpartition('/')
+        wanted.setdefault(parent, {})[leaf] = None
+        wanted.setdefault(rel, {})          # an empty folder still has to be there
+    for rel, _path, size in files:
+        parent, _, leaf = rel.rpartition('/')
+        wanted.setdefault(parent, {})[leaf] = size
+
+    wrong = []
+    for parent, expected in wanted.items():
+        path = _dav_path(base, parent) + '/' if parent else base
+        # No request body: an empty PROPFIND asks for all properties (RFC 4918
+        # 9.1), and it is what survives a relay that forwards bodies only for
+        # the methods that normally have one.
+        status, body = dav.request('PROPFIND', path, headers={'Depth': '1'})
+        if status != 207:
+            wrong.append('%s: HTTP %d when listing it' % (parent or 'the destination', status))
+            continue
+        own = unquote(path).rstrip('/')
+        held = {}
+        for entry, is_folder, size in _dav_entries(body):
+            if entry != own:
+                held[unicodedata.normalize('NFC', entry.rpartition('/')[2])] = (is_folder, size)
+        for leaf, size in expected.items():
+            name = parent + '/' + leaf if parent else leaf
+            got = held.get(leaf)
+            if got is None:
+                wrong.append('%s: not there' % name)
+            elif size is None and not got[0]:
+                wrong.append('%s: is not a folder' % name)
+            elif size is not None and got[1] != size:
+                wrong.append('%s: %d bytes sent, server says %s' % (name, size, got[1]))
+    if wrong:
+        raise PutMismatch('the server does not hold what was sent:\n  '
+                          + '\n  '.join(wrong[:20])
+                          + ('\n  and %d more' % (len(wrong) - 20) if len(wrong) > 20 else ''))
+
+
+def put_tree(plan, url, replace=False, cafile=None):
+    """Send a plan from _put_plan into the WebDAV folder at url, then check it.
+    Returns (files, folders, bytes)."""
+    name, folders, files = plan
+    u = urlsplit(url)
+    # The URL may arrive with its path encoded or not; existing escapes stay.
+    base = quote(u.path.rstrip('/') + '/', safe="/%:@!$&'()*+,;=")
+    dav = _Dav(url, cafile)
+    try:
+        # The destination must already be a folder. A typing mistake in a URL
+        # has to fail here, not quietly grow a tree somewhere nobody looks.
+        status, body = dav.request('PROPFIND', base, headers={'Depth': '0'})
+        if status != 207:
+            raise RuntimeError('HTTP %d for the destination %s' % (status, unquote(base)))
+        if not any(is_folder for _p, is_folder, _s in _dav_entries(body)):
+            raise FetchRefused('the destination %s is not a folder' % unquote(base))
+
+        status, _body = dav.request('PROPFIND', _dav_path(base, name), headers={'Depth': '0'})
+        if status == 207 and not replace:
+            raise FetchRefused('%s already exists there; pass --replace to write over it' % name)
+        if status not in (207, 404):
+            raise RuntimeError('HTTP %d when looking for %s' % (status, name))
+
+        for rel in folders:
+            status, _body = dav.request('MKCOL', _dav_path(base, rel) + '/')
+            if status != 201 and not (status == 405 and replace):
+                raise RuntimeError('HTTP %d creating the folder %s' % (status, rel))
+        sent = 0
+        for done, (rel, path, size) in enumerate(files):
+            status, _body = dav.request('PUT', _dav_path(base, rel),
+                                        chunks=lambda: _file_chunks(path, size),
+                                        headers={'Content-Length': str(size)})
+            if status not in (201, 204):
+                raise RuntimeError('HTTP %d sending %s, after %d of %d files. What was sent '
+                                   'stays there, and --replace sends it all again.'
+                                   % (status, rel, done, len(files)))
+            sent += size
+        _put_verify(dav, base, folders, files)
+    finally:
+        dav.close()
+    return len(files), len(folders), sent
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +1208,16 @@ def main():
     parser.add_argument('--allow-outside', action='store_true',
                         help='permit a destination outside the working directory')
     parser.add_argument('--allow-host-suffix', metavar='SUFFIX', default=None,
-                        help='hosts allowed for --fetch (default: the Kerberos realm)')
+                        help='hosts allowed for --fetch and --put (default: the Kerberos '
+                             'realm)')
+
+    # Send a file or folder. The bytes go from disk to the server and never
+    # pass through a model either.
+    parser.add_argument('--put', nargs=2, metavar=('PATH', 'URL'), default=None,
+                        help='send a file or folder into the WebDAV folder at URL over '
+                             'SPNEGO, instead of bridging stdio')
+    parser.add_argument('--replace', action='store_true',
+                        help='let --put write over what is already there')
 
     # Serve, so a machine with no ticket can use this one's.
     parser.add_argument('--listen', metavar='SOCKET', default=None,
@@ -972,6 +1263,33 @@ def main():
         log('wrote %s (%d bytes, sha256 %s)' % (opts.output, n, got))
         return
 
+    if opts.put:
+        source, url = opts.put
+        # Policy first, credentials second, for the reason --fetch gives.
+        try:
+            _check_put_url(url, host_suffix)
+            plan = _put_plan(source)
+        except FetchRefused as exc:
+            log('refused: %s' % exc)
+            sys.exit(5)
+        try:
+            check_credentials()
+        except Exception as exc:
+            log('no usable Kerberos credentials: %s' % exc)
+            sys.exit(2)
+        try:
+            n_files, n_folders, n_bytes = put_tree(plan, url, replace=opts.replace,
+                                                   cafile=opts.ca)
+        except FetchRefused as exc:
+            log('refused: %s' % exc); sys.exit(5)
+        except PutMismatch as exc:
+            log('%s' % exc); sys.exit(4)
+        except Exception as exc:
+            log('send failed: %s' % exc); sys.exit(3)
+        log('sent %d files in %d folders (%d bytes) to %s; every name and size checked'
+            % (n_files, n_folders, n_bytes, url))
+        return
+
     if opts.fetch_listen:
         try:
             check_credentials()
@@ -990,7 +1308,8 @@ def main():
         return
 
     if not opts.url:
-        parser.error('a URL is required unless --fetch, --fetch-listen or --git-listen is used')
+        parser.error('a URL is required unless --fetch, --put, --fetch-listen or --git-listen '
+                     'is used')
 
     if opts.listen:
         try:
