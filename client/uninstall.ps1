@@ -3,6 +3,10 @@
 #   .\uninstall.ps1          # default: DRY RUN - print the plan, change nothing
 #   .\uninstall.ps1 -Yes     # apply the plan
 #
+# Run it elevated when setup.ps1 put the realm CA into Windows' machine trust
+# store: only an administrator can take it out, and -Yes refuses to start
+# without one rather than finish half the job and lose the manifest.
+#
 # Everything removed or restored here is justified by an entry in
 # %USERPROFILE%\bin\mcp-krb-manifest.json saying setup.ps1 created or changed
 # it. The VS Code keys are the reason this script exists at all: the old
@@ -29,11 +33,17 @@ param(
     [string]$ManifestPath = '',
     [string]$UserProfile = $env:USERPROFILE,
     [string]$ProfilePath = '',
-    [string]$WslCommand = 'wsl.exe'
+    [string]$WslCommand = 'wsl.exe',
+    [string]$CertStore = 'Cert:\LocalMachine\Root'
 )
 $ErrorActionPreference = 'Stop'
 function Say($m) { Write-Host "[uninstall] $m" }
 function Warn($m) { Write-Host "[warn ] $m" -ForegroundColor Yellow }
+function Test-Admin {
+    (New-Object Security.Principal.WindowsPrincipal(
+        [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
 $binDir = Join-Path $UserProfile 'bin'
 if (-not $ManifestPath) { $ManifestPath = Join-Path $binDir 'mcp-krb-manifest.json' }
@@ -62,6 +72,7 @@ if (-not (Test-Path $ManifestPath)) {
     Say '  the wslssh, wslgit, krb-fetch, mcp-fetch, krb-git, krb-put and wslk* lines in the PowerShell profile (marker: setup.ps1)'
     Say '  remote.SSH.* keys in each editor settings.json, and their prior values'
     Say '  the internal-tools entry in .claude.json'
+    Say '  the realm CA in the machine''s Trusted Root store, if setup.ps1 added it'
     Say '  everything inside the WSL distro (its own manifest lives there)'
     Say ''
     Say 'Without it, removal cannot be told apart from vandalising values you set'
@@ -77,6 +88,22 @@ if ($doc.manifest_version -ne 1) {
 
 $created = @();     if ($doc.PSObject.Properties.Name -contains 'created')      { $created = @($doc.created) }
 $createdDirs = @(); if ($doc.PSObject.Properties.Name -contains 'created_dirs') { $createdDirs = @($doc.created_dirs) }
+$thumbprints = @()
+if ($doc.PSObject.Properties.Name -contains 'trusted_cert_thumbprints') { $thumbprints = @($doc.trusted_cert_thumbprints) }
+
+# A CA setup.ps1 added that is still trusted. Taking one out of the machine's
+# store needs an administrator, so -Yes checks that before it changes anything:
+# a run that removed the rest and then the manifest would leave the CA trusted
+# with nothing left on record to say it was the kit's.
+$trusted = @($thumbprints | Where-Object {
+    [string]$_ -match '^[0-9A-Fa-f]{40}$' -and (Test-Path (Join-Path $CertStore $_))
+})
+if ($act -and $trusted.Count -gt 0 -and $CertStore -like 'Cert:\LocalMachine\*' -and -not (Test-Admin)) {
+    Say "ERROR: setup.ps1 put the realm CA into the machine's Trusted Root store, and only"
+    Say 'an administrator can take it out. Re-run this from PowerShell opened as'
+    Say 'Administrator. Nothing was removed.'
+    exit 1
+}
 
 # The manifest is data, not authority: only paths under this user's profile
 # (or the explicitly resolved PowerShell profile) may be acted on, so a
@@ -231,6 +258,25 @@ if ($reg -and (Test-Path $cfg)) {
     }
 } elseif (-not $reg) {
     Say '  MCP registration: none recorded as the installer''s - left alone.'
+}
+
+# --- 4b. the realm CA setup.ps1 added to Windows' trust store ---------------
+# Only a thumbprint the manifest records is removed, and setup.ps1 records only
+# a CA it added itself: one that was trusted before the kit arrived, by policy or
+# by hand, is not the kit's to take away.
+foreach ($t in $thumbprints) {
+    if ([string]$t -notmatch '^[0-9A-Fa-f]{40}$') {
+        Say "  left alone: '$t' (manifest names it, but it is not a certificate thumbprint)"
+        continue
+    }
+    $certPath = Join-Path $CertStore $t
+    if (Test-Path $certPath) {
+        Say "  remove the realm CA $t from $CertStore (added by installer)"
+        if ($act) { Remove-Item -Path $certPath }
+        elseif ($CertStore -like 'Cert:\LocalMachine\*' -and -not (Test-Admin)) {
+            Say '    (that needs Administrator: run -Yes from PowerShell opened as Administrator)'
+        }
+    }
 }
 
 # --- 5. the WSL side, in the distro the installer provisioned ---------------

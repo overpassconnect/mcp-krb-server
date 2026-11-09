@@ -70,6 +70,38 @@ BeforeAll {
         $out = & powershell @psArgs 2>&1 | Out-String
         [pscustomobject]@{ Out = $out; Code = $LASTEXITCODE }
     }
+
+    # A throwaway certificate store under CurrentUser, so the CA step runs
+    # against a real Cert: drive without touching any store that decides trust.
+    function New-TestStore {
+        $name = 'McpKrbTest' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $s = New-Object Security.Cryptography.X509Certificates.X509Store($name, 'CurrentUser')
+        $s.Open('ReadWrite')
+        $s.Close()
+        "Cert:\CurrentUser\$name"
+    }
+
+    # The Cert: drive refuses to delete a store under CurrentUser, and such a
+    # store is a key under HKCU, so the key is what goes.
+    function Remove-TestStore([string]$Store) {
+        Remove-Item -Path ('HKCU:\Software\Microsoft\SystemCertificates\' + (Split-Path $Store -Leaf)) -Recurse -ErrorAction SilentlyContinue
+    }
+
+    # A self-signed certificate in that store, its public half only, as a CA
+    # certificate arrives.
+    function Add-TestCert {
+        param([string]$Store, [string]$Subject)
+        $rsa = [Security.Cryptography.RSA]::Create(2048)
+        $req = [Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=$Subject", $rsa,
+            [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $made = $req.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1), [DateTimeOffset]::Now.AddDays(1))
+        $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($made.RawData)
+        $s = New-Object Security.Cryptography.X509Certificates.X509Store((Split-Path $Store -Leaf), 'CurrentUser')
+        $s.Open('ReadWrite')
+        $s.Add($cert)
+        $s.Close()
+        $cert
+    }
 }
 
 Describe 'uninstall.ps1' {
@@ -187,5 +219,48 @@ Describe 'uninstall.ps1' {
             ($t.StartsWith('#') -or $t.StartsWith('Say') -or $t.StartsWith('Warn')) |
                 Should -BeTrue -Because "line looks executable: $line"
         }
+    }
+
+    It 'setup.ps1 records the CA it adds under the key uninstall.ps1 reads' {
+        # The same parity as the profile markers: a CA setup.ps1 trusted under a
+        # key uninstall.ps1 never reads would stay trusted after uninstall.
+        $setup = Get-Content -Raw (Join-Path $PSScriptRoot '..\..\client\setup.ps1')
+        $setup | Should -Match ([regex]::Escape("-Store 'Cert:\LocalMachine\Root'"))
+        $setup | Should -Match ([regex]::Escape('$Manifest.trusted_cert_thumbprints += '))
+        $known = Get-Content -Raw $script:Script
+        $known | Should -Match ([regex]::Escape("`$CertStore = 'Cert:\LocalMachine\Root'"))
+        $known | Should -Match ([regex]::Escape("-contains 'trusted_cert_thumbprints'"))
+    }
+}
+
+Describe 'uninstall.ps1 and the realm CA in Windows'' trust store' {
+    BeforeEach {
+        $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        $null = New-Tree -Root $root
+        $store = New-TestStore
+        $ours = Add-TestCert -Store $store -Subject 'Kit Test Realm CA'
+        $theirs = Add-TestCert -Store $store -Subject 'Already Trusted CA'
+        $manifestPath = Join-Path $root 'bin\mcp-krb-manifest.json'
+        $m = Get-Content -Raw $manifestPath | ConvertFrom-Json
+        $m | Add-Member -NotePropertyName trusted_cert_thumbprints -NotePropertyValue @($ours.Thumbprint, 'not-a-thumbprint')
+        Set-Content -Path $manifestPath -Value ($m | ConvertTo-Json -Depth 6)
+    }
+    AfterEach {
+        Remove-TestStore $store
+    }
+
+    It 'takes out the CA the manifest records, and only that one' {
+        $r = Invoke-Uninstall -Root $root -Extra @('-Yes', '-CertStore', $store)
+        $r.Code | Should -Be 0
+        (Join-Path $store $ours.Thumbprint) | Should -Not -Exist
+        (Join-Path $store $theirs.Thumbprint) | Should -Exist
+        $r.Out | Should -Match 'not a certificate thumbprint'
+    }
+
+    It 'a dry run names the CA and leaves it trusted' {
+        $r = Invoke-Uninstall -Root $root -Extra @('-CertStore', $store)
+        $r.Code | Should -Be 0
+        $r.Out | Should -Match $ours.Thumbprint
+        (Join-Path $store $ours.Thumbprint) | Should -Exist
     }
 }
