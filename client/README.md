@@ -381,9 +381,9 @@ A copy of `setup.ps1` downloaded from the publisher already carries the pin.
 Running the script straight out of the repo checkout does not, so pass it.
 
 The same CA then goes into Windows' own trust store, `Cert:\LocalMachine\Root`,
-because nothing that runs on Windows itself reads WSL's: a mapped WebDAV drive, or
-a Windows browser on a realm page that needs no ticket, checks certificates against
-Windows' store alone. The copy is hashed against `-CaSha256` again on the Windows
+because nothing that runs on Windows itself reads WSL's: any Windows program that
+speaks HTTPS to a realm host checks certificates against Windows' store alone. The
+copy is hashed against `-CaSha256` again on the Windows
 side before it is added, since step 2 keeps a copy it finds already installed
 without checking it. The store is the machine's, so every account and service on
 the PC trusts what the realm CA signs, as everything inside WSL already did, and
