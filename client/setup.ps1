@@ -48,9 +48,10 @@
 # What does authenticate that transport is -CaSha256, the only out-of-band root
 # left in the Windows path. WSL is not FreeIPA-enrolled, so unlike a realm host
 # it has no /etc/ipa/ca.crt to pin against; step 2 installs the realm CA into
-# WSL's trust store and pins it by SHA-256 supplied out of band. That is why an
-# unpinned CA installs nothing, a mismatched one is fatal, and a missing one is
-# fatal as soon as -McpUrl is asked for.
+# WSL's trust store and pins it by SHA-256 supplied out of band, and step 2b puts
+# the same CA into Windows' machine trust store. That is why an unpinned CA
+# installs nothing, a mismatched one is fatal, and a missing one is fatal as soon
+# as it is pinned or -McpUrl is asked for.
 #
 # Afterwards:
 #     wsl kinit jdoe@EXAMPLE.INTERNAL     (~once a week; -R renews)
@@ -74,7 +75,8 @@ param(
     # value left in the Windows path, so it has to come from whoever runs the
     # script rather than from whoever served it; a hash injected by the publisher
     # into a script the publisher serves would be checking that host against
-    # itself. Empty means the CA is not installed.
+    # itself. Empty means the CA is not installed. Given, it goes into WSL and
+    # into Windows' machine trust store (step 2b), so the run needs Administrator.
     [string]$CaSha256 = '',
     [string]$WslDistro = 'Ubuntu-24.04',
     # Download base: the publisher's directory everything is fetched from. No
@@ -228,6 +230,29 @@ function Invoke-WslScript {
         return $out
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
+# Adds the realm CA in $Path to the Windows certificate store $Store, a Cert:
+# path such as Cert:\LocalMachine\Root, and returns its thumbprint when this call
+# added it, or $null when it was there already. The file is hashed again here
+# rather than trusted for having come out of WSL: step 2 keeps a copy it finds
+# already installed without fetching or checking it again, so a copy left by an
+# earlier run, or put there by hand, would otherwise reach Windows' root store
+# unchecked against this run's pin.
+function Add-RealmCaToStore {
+    param([Parameter(Mandatory)][string]$Path,
+          [Parameter(Mandatory)][string]$Sha256,
+          [Parameter(Mandatory)][string]$Store)
+    $want = $Sha256.ToLower()
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLower()
+    if ($got -ne $want) {
+        throw "realm CA: the copy in WSL's trust store does not match -CaSha256 (want $want, got $got), so nothing was added to Windows. If the realm CA was replaced, delete /usr/local/share/ca-certificates/realm-ca.crt inside WSL so step 2 fetches it again, then re-run."
+    }
+    $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $Path
+    $inStore = Join-Path $Store $cert.Thumbprint
+    if (Test-Path $inStore) { return $null }
+    Import-Certificate -FilePath $Path -CertStoreLocation $Store | Out-Null
+    if (-not (Test-Path $inStore)) { throw "realm CA: Windows did not keep it in $Store." }
+    return $cert.Thumbprint
+}
 
 # --- install manifest --------------------------------------------------------
 # What this run changed on the Windows side, accumulated as the steps run and
@@ -245,7 +270,9 @@ function Invoke-WslScript {
 # because only the first run saw the machine as the user had it. In
 # prior_values, keyed by settings file then by key, $null means the key was
 # absent (uninstall deletes it) and a string is the user's own raw JSON scalar
-# (uninstall restores it verbatim).
+# (uninstall restores it verbatim). trusted_cert_thumbprints holds the SHA-1
+# thumbprint of each CA step 2b added to Windows' trust store, which is how the
+# Cert: drive names a certificate; it merges as a set, like created.
 $Manifest = @{
     written_by               = 'setup.ps1'
     created                  = @()
@@ -254,6 +281,7 @@ $Manifest = @{
     packages_already_present = @()
     replaced                 = @{}
     prior_values             = @{}
+    trusted_cert_thumbprints = @()
 }
 
 function Merge-InstallManifest {
@@ -278,9 +306,10 @@ function Merge-InstallManifest {
         packages_already_present = @()
         replaced                 = @{}
         prior_values             = @{}
+        trusted_cert_thumbprints = @()
     }
     if ($doc) {
-        foreach ($k in 'created', 'created_dirs', 'packages_installed', 'packages_already_present') {
+        foreach ($k in 'created', 'created_dirs', 'packages_installed', 'packages_already_present', 'trusted_cert_thumbprints') {
             if ($doc.PSObject.Properties.Name -contains $k) { $out[$k] = @($doc.$k) }
         }
         foreach ($k in 'replaced', 'prior_values') {
@@ -299,6 +328,9 @@ function Merge-InstallManifest {
     }
     foreach ($i in @($Fragment.created))      { if ($out['created'] -notcontains $i)      { $out['created'] += $i } }
     foreach ($i in @($Fragment.created_dirs)) { if ($out['created_dirs'] -notcontains $i) { $out['created_dirs'] += $i } }
+    foreach ($i in @($Fragment.trusted_cert_thumbprints)) {
+        if ($i -and $out['trusted_cert_thumbprints'] -notcontains $i) { $out['trusted_cert_thumbprints'] += $i }
+    }
     foreach ($p in @($Fragment.packages_already_present)) {
         if ($out['packages_installed'] -notcontains $p -and $out['packages_already_present'] -notcontains $p) {
             $out['packages_already_present'] += $p
@@ -351,6 +383,13 @@ function Get-JsoncScalarRaw {
     $m = [regex]::Match($mask, '("' + $esc + '"\s*:\s*)("(?:[^"\\]|\\.)*"|true|false|null|-?[\d.]+(?:[eE][-+]?\d+)?)')
     if ($m.Success) { return $Text.Substring($m.Groups[2].Index, $m.Groups[2].Length) }
     return $null
+}
+
+# A pinned CA goes into the machine's Trusted Root store in step 2b, which only
+# an administrator can write, and that step is fatal. Refused here, before
+# anything runs, rather than after WSL has been provisioned.
+if ($CaSha256 -and -not (Test-Admin)) {
+    throw "Run this from PowerShell opened as Administrator: with -CaSha256 it puts the realm CA into Windows' machine trust store, and only an administrator can."
 }
 
 # --- 1. WSL2 (skipped entirely if a distro already exists) ------------------
@@ -707,7 +746,7 @@ if ($provisioned.Count -gt 0 -and $provisioned[0].Substring(7).Trim()) {
 }
 Say 'WSL: krb5-user + python3-gssapi installed, /etc/krb5.conf written (renewable, private ccache)'
 if ($wslStep2 -contains 'CA-UNPINNED') {
-    Warn 'realm CA NOT installed: this copy of the script carries no pinned hash.'
+    Warn 'realm CA NOT installed, in WSL or in Windows: this copy of the script carries no pinned hash.'
     Warn 'Pass -CaSha256 <sha256sum of /etc/ipa/ca.crt, taken from any enrolled host>.'
 } elseif ($wslStep2 -contains 'CA-SKIP') {
     Warn "realm CA endpoint unreachable (http://$Kdc/ipa/config/ca.crt). SSH works; HTTPS to internal hosts will not until this is installed."
@@ -784,6 +823,39 @@ if ($wslStep2 -contains 'FF-OK' -and -not $SkipFirefox) {
 }
 if ($wslStep2 -contains 'MANIFEST-SKIP') {
     Warn 'WSL: the install manifest could not be updated - uninstall will not know what this run changed inside WSL.'
+}
+
+# --- 2b. the realm CA in Windows' own trust store ---------------------------
+# Step 2 trusts the CA inside WSL, and Firefox there reads that copy, but nothing
+# that runs on Windows itself does: Windows programs check certificates against
+# Windows' store alone, so a mapped WebDAV drive, or a Windows browser on a realm
+# page that needs no ticket, fails TLS without it. A pinned CA therefore goes into
+# the machine's Trusted Root store as well, for every account on this PC, and a
+# run that cannot put it there fails, as a mismatched pin already does. Only a
+# CA this run added is recorded, so uninstall never removes one that was trusted
+# before the kit arrived.
+if ($CaSha256) {
+    $caCopy = Join-Path $env:TEMP ('realm-ca-' + [guid]::NewGuid().ToString('N') + '.crt')
+    $caCopyWsl = '/mnt/' + $caCopy.Substring(0, 1).ToLower() + ($caCopy.Substring(2) -replace '\\', '/')
+    $distroArgs = if ($Manifest.wsl_distro) { @('-d', $Manifest.wsl_distro) } else { @() }
+    try {
+        # Same relaxed preference as Invoke-WslScript: a missing file is the
+        # expected failure here, and it is reported below, not as stderr.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { wsl @distroArgs -e cp /usr/local/share/ca-certificates/realm-ca.crt $caCopyWsl 2>$null | Out-Null }
+        finally { $ErrorActionPreference = $prevEap }
+        if (-not (Test-Path $caCopy)) {
+            throw "realm CA: step 2 could not install it in WSL (http://$Kdc/ipa/config/ca.crt unreachable?), and with -CaSha256 Windows' trust store needs it too. Re-run once the CA endpoint answers."
+        }
+        $added = Add-RealmCaToStore -Path $caCopy -Sha256 $CaSha256 -Store 'Cert:\LocalMachine\Root'
+        if ($added) {
+            $Manifest.trusted_cert_thumbprints += $added
+            Say "Windows: realm CA added to the machine's Trusted Root store (thumbprint $added)"
+        } else {
+            Say "Windows: realm CA already in the machine's Trusted Root store"
+        }
+    } finally { Remove-Item $caCopy -ErrorAction SilentlyContinue }
 }
 
 # --- 3. ssh_config inside WSL, in a sentinel-delimited managed block ---------

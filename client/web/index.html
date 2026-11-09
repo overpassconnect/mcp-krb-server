@@ -256,8 +256,8 @@ sudo sh uninstall.sh --yes      # apply it</code></pre>
     <h2>Windows 11</h2>
     <p class="note">Windows' built-in <code>ssh.exe</code> cannot read a Kerberos ticket, so the
     client runs inside WSL2. <strong>Open PowerShell as Administrator</strong>: installing the
-    WSL distro needs it. If a distro already exists that step is skipped, but start elevated
-    anyway so the run does not stop halfway.</p>
+    WSL distro needs it, and so does putting the realm CA into Windows' own trust store, which
+    the command below always does, so the script refuses to start without it.</p>
 
     <h3>Install</h3>
     <p class="note">One command, one file to download. The realm values below are already filled
@@ -329,6 +329,11 @@ krb-fetch &lt;url&gt; -o C:\path\file        # fetch from a Kerberized service (
     download verifiable, and a hash read from the same page it is meant to verify proves
     nothing.</p>
 
+    <p class="note">The CA it pins goes into WSL's trust store and into Windows' own, for the
+    whole machine, because programs that run on Windows itself, a mapped WebDAV drive for one,
+    check certificates against Windows' store and never read WSL's. A run that cannot put it
+    in both stops with an error.</p>
+
     <p class="note">It also installs Firefox inside WSL. That is not a preference: Windows holds
     no Kerberos ticket, so a Windows browser can never answer a <code>Negotiate</code> challenge
     and will ask for your password forever. The one in WSL reads the same ticket your
@@ -370,6 +375,10 @@ iwr -useb "$base/uninstall.ps1" -OutFile uninstall.ps1
     platforms, and it cleans the WSL side too. It reverses that side through the distro the
     installer recorded, never the current default: on a machine that later gained Docker Desktop
     the default is frequently not the distro that was provisioned.</p>
+
+    <p class="note">Apply it from PowerShell opened as Administrator: it takes the realm CA back
+    out of Windows' trust store, which needs it, and <code>-Yes</code> refuses to start
+    otherwise. A CA that was trusted before this kit arrived stays.</p>
 
     <p class="note">The VS Code keys are the reason this script exists rather than a list of
     steps. <code>remote.SSH.path</code> goes back to its recorded prior value instead of being

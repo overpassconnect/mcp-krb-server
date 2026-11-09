@@ -152,7 +152,7 @@ The TLS leg is narrowed where it can be:
 | Platform | What pins the TLS leg |
 |---|---|
 | Linux, already enrolled | the realm CA at `/etc/ipa/ca.crt`, which `ipa-client-install` put there |
-| Windows (WSL) | the realm CA is installed by the script into WSL's trust store and pinned by SHA-256 via `-CaSha256`, delivered out of band |
+| Windows (WSL) | the realm CA is installed by the script into WSL's trust store and Windows' machine trust store, pinned by SHA-256 via `-CaSha256`, delivered out of band |
 
 WSL is never enrolled in the realm, so it starts with no realm CA at all. That is
 why the Windows path needs the hash and the Linux path does not, and it is why
@@ -255,7 +255,9 @@ repo.
 .\setup.ps1 -IpaUser jdoe
 ```
 
-Idempotent, takes about a second, no admin rights needed if WSL2 already exists.
+Idempotent, takes about a second, no admin rights needed if WSL2 already exists
+and no `-CaSha256` is given; with one, the realm CA goes into Windows' machine
+trust store too, which needs an elevated PowerShell (see [Realm CA](#realm-ca)).
 Other realms: `-Realm`, `-Domain`, `-Kdc`. Opt out of steps with `-SkipWsl` /
 `-SkipVSCode` / `-SkipMcp`. Safe to run non-interactively (Intune, SCCM,
 PSRemoting), where the host leaves `$PROFILE` empty and the script reconstructs
@@ -378,6 +380,17 @@ transport cannot be the control and `-CaSha256` is the pin, delivered out of ban
 A copy of `setup.ps1` downloaded from the publisher already carries the pin.
 Running the script straight out of the repo checkout does not, so pass it.
 
+The same CA then goes into Windows' own trust store, `Cert:\LocalMachine\Root`,
+because nothing that runs on Windows itself reads WSL's: a mapped WebDAV drive, or
+a Windows browser on a realm page that needs no ticket, checks certificates against
+Windows' store alone. The copy is hashed against `-CaSha256` again on the Windows
+side before it is added, since step 2 keeps a copy it finds already installed
+without checking it. The store is the machine's, so every account and service on
+the PC trusts what the realm CA signs, as everything inside WSL already did, and
+writing it needs Administrator: a run with `-CaSha256` refuses to start without
+it. Only a CA the run added is recorded in the manifest, so uninstall takes out
+the kit's CA and leaves one that was trusted before.
+
 This hash is now the only out-of-band trust root in the whole Windows path, so
 treat it as one: deliver it the way you would have delivered a signing key (MDM,
 Intune parameter, kickstart, a printed handout), and read the value once from an
@@ -394,12 +407,15 @@ Three outcomes, all deliberate:
 |---|---|---|
 | `CA-PIN-MISMATCH` | fetched CA is not the one you pinned | fatal, installs nothing |
 | `CA-UNPINNED` | no pin in this copy and none passed | warns, installs nothing, run continues |
-| `CA-SKIP` | CA endpoint unreachable | warns, run continues |
+| `CA-SKIP` | CA endpoint unreachable | fatal once step 2 is done, because a pinned CA has to reach Windows' trust store too |
 
 `CA-UNPINNED` installs nothing: fetching a CA over an unauthenticated channel and
 trusting it because it arrived first is not a control. The run still succeeds,
 because SSH authenticates with GSSAPI and host keys and must keep working on a
-workstation that cannot reach the CA. The MCP step is the exception: it speaks
+workstation that cannot reach the CA. A pinned run that cannot reach the CA stops
+after step 2 instead, since Windows' store cannot be given a CA that never
+arrived; a re-run once the endpoint answers finishes it. The MCP step is the
+exception: it speaks
 HTTPS, so with `-McpUrl` a missing CA is fatal and the script exits non-zero
 rather than failing later with an opaque certificate error. Steps 1 to 5 have
 already run at that point, so SSH is provisioned either way.
@@ -1284,6 +1300,11 @@ recorded in the manifest, never the default distro:
 .\uninstall.ps1                 # print the plan
 .\uninstall.ps1 -Yes            # apply it
 ```
+
+Apply it from PowerShell opened as Administrator when the install put the realm CA
+into Windows' trust store: taking it out needs that, and `-Yes` refuses to start
+otherwise rather than remove everything else and the manifest with it. A CA that
+was trusted before the kit arrived stays.
 
 macOS uses the same `uninstall.sh`, which reads `uname` and takes the macOS
 paths: the kit's tree under `~/Library/Application Support/mcp-krb`, the
