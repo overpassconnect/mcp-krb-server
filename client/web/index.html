@@ -330,9 +330,9 @@ krb-fetch &lt;url&gt; -o C:\path\file        # fetch from a Kerberized service (
     nothing.</p>
 
     <p class="note">The CA it pins goes into WSL's trust store and into Windows' own, for the
-    whole machine, because programs that run on Windows itself, a mapped WebDAV drive for one,
-    check certificates against Windows' store and never read WSL's. A run that cannot put it
-    in both stops with an error.</p>
+    whole machine, because any Windows program that speaks HTTPS to a realm host checks
+    certificates against Windows' store and never reads WSL's. A run that cannot put it in
+    both stops with an error.</p>
 
     <p class="note">It also installs Firefox inside WSL. That is not a preference: Windows holds
     no Kerberos ticket, so a Windows browser can never answer a <code>Negotiate</code> challenge

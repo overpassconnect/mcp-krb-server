@@ -828,8 +828,8 @@ if ($wslStep2 -contains 'MANIFEST-SKIP') {
 # --- 2b. the realm CA in Windows' own trust store ---------------------------
 # Step 2 trusts the CA inside WSL, and Firefox there reads that copy, but nothing
 # that runs on Windows itself does: Windows programs check certificates against
-# Windows' store alone, so a mapped WebDAV drive, or a Windows browser on a realm
-# page that needs no ticket, fails TLS without it. A pinned CA therefore goes into
+# Windows' store alone, so any Windows program that speaks HTTPS to a realm host
+# fails TLS without it. A pinned CA therefore goes into
 # the machine's Trusted Root store as well, for every account on this PC, and a
 # run that cannot put it there fails, as a mismatched pin already does. Only a
 # CA this run added is recorded, so uninstall never removes one that was trusted
