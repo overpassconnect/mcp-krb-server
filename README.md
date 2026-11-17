@@ -326,8 +326,16 @@ serves), separate because macOS ships Heimdal rather than MIT krb5 and needs a
 specific `kdc = tcp/...` line that a naive config gets wrong. Both halves of the
 kit apply there: SSH via GSSAPI is proven, and the MCP bridge has a documented
 path too (`pip install gssapi`; the wheel links the system Heimdal, so the bridge
-reads the same ticket `kinit` writes), verified by linkage though not yet
-exercised end to end from a Mac.
+reads the same ticket `kinit` writes), verified by linkage and, since
+2026-11-17, end to end from a Mac against the live server ([CL2] in
+[SECURITY.md](SECURITY.md)).
+
+A workstation takes a new bridge by re-running the command that provisioned it,
+with the same arguments, once the kit it downloads from has been republished.
+Every installer replaces the bridge files in place and leaves the rest as it
+was; an MCP client keeps running the old bridge until its server entry is
+reconnected. Detail per platform in [`client/README.md`](client/README.md),
+"Taking a new bridge".
 
 Shared team workspace: once users reach a host with their own Kerberos identity, a
 directory the whole team can edit needs no extra machinery. FreeIPA already puts
@@ -402,11 +410,11 @@ Non-domain-joined Windows workstations need one extra step, covered under
         v                            |         |                                   |
   [ mcp-krb-bridge.py ]              |         |                                   |
         |     \                      |         |                                   |
-        |      \ (2) [T] Kerberos TGS-REQ, SPNEGO mech 1.3.6.1.5.5.2 ------------> [ FreeIPA KDC ]
+        |      \ (2) [T] Kerberos TGS-REQ, krb5 mech 1.2.840.113554.1.2.2 -------> [ FreeIPA KDC ]
         |       \    [A] your TGT, put in your ccache by SSSD when you logged in.  |  ipa.example
         |        \       The bridge never prompts for a password.                  |  .internal
         |         \  Flags asked for: mutual_auth, out_of_sequence.                |       |
-        |          \ never delegate_to_peer. See [CL1].                            |       |
+        |          \ never delegate_to_peer, never NTLM. [CL1] [CL2]               |       |
         |           \                 |         |                                  |       |
         |            <---- service ticket for HTTP/mcp.example.internal -----------+-------+
         |                             |         |                                   |

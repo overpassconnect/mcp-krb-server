@@ -58,6 +58,7 @@ accept, or apply the named compensating control). Severity reflects a
   - [[CB1] Channel binding unenforceable behind TLS-terminating nginx](#cb1-channel-binding-unenforceable-behind-tls-terminating-nginx)
   - [[NG1] nginx hardening](#ng1-nginx-hardening)
   - [[CL1] Clients: no token over plaintext, no credential delegation](#cl1-clients-no-token-over-plaintext-no-credential-delegation)
+  - [[CL2] Clients: Kerberos asked for by name, never NTLM](#cl2-clients-kerberos-asked-for-by-name-never-ntlm)
 - [Threat model: a malicious or tampered client](#threat-model-a-malicious-or-tampered-client)
   - [[D1] On-behalf-of forwarding to a downstream service](#d1-on-behalf-of-forwarding-to-a-downstream-service)
 - [LOW / operational (DEPLOYMENT)](#low--operational-deployment)
@@ -106,6 +107,10 @@ no-header, replay all rejected) and by hermetic unit tests including an explicit
 *Deployment:* krb5-only (no `gss-ntlmssp`) is still recommended hygiene so
 SPNEGO cannot even offer NTLM; it is no longer the sole thing standing between
 you and a bypass.
+
+The NTLM refusal is deliberately blunt: a token that so much as lists NTLM is
+refused, even when the credential inside it is krb5. The shipped client is built
+so that it never sends one, whatever the workstation holds ([CL2]).
 
 ---
 
@@ -529,6 +534,50 @@ it refuses any connection whose uid, read from the kernel's TCP table, is not
 its own, so the port carries the socket's `0600` across the one hop TCP adds.
 `test_krb_git.py` covers each refusal.
 
+### [CL2] Clients: Kerberos asked for by name, never NTLM
+Status: fixed. The bridge mints every token with the krb5 mechanism itself
+(`1.2.840.113554.1.2.2`), never with SPNEGO, and on native Windows asks pyspnego
+for `protocol='kerberos'` instead of the default `negotiate`. It then frames the
+krb5 token as a SPNEGO NegTokenInit whose mech list is krb5 alone, and refuses to
+send anything that is not a krb5 token. This covers every token the bridge
+mints: the MCP requests, `--fetch`, `--put` and the git relay.
+
+Why the client asks for krb5 directly. Asked for SPNEGO, a GSS library offers
+every mechanism the user holds credentials for, and that set is not the bridge's
+to control. On macOS, mounting an SMB share in Finder leaves NTLM credentials in
+GSS.framework (`gsstool list` shows them, expiring "never"), and from then on
+every SPNEGO token the bridge minted listed NTLMSSP beside krb5. The credential
+inside was still krb5, but the server refuses any token that names NTLM ([C1]),
+so every request was a 401, audited as `ntlm-token-rejected`, until those
+credentials were destroyed or the share unmounted. Seen on 2026-11-17. The
+server's refusal stays as it is: NTLM is off on purpose, and a client that
+offers it is the client's to fix. Asked for krb5 by name, the library has
+nothing to choose from, so no workstation state can put NTLM in the token.
+
+Why it is still framed as SPNEGO. The MCP server accepts a bare krb5 token
+(`_ACCEPTED_MECHS`), and so does Gitea, but `--fetch` may be pointed at any realm
+host, and a Java acceptor holding a SPNEGO-only credential answers a bare krb5
+token with HTTP 500. Jenkins does (measured 2026-11-17). The framing is what
+SPNEGO itself emits once it has settled on krb5, and it is the framing
+`server/delegation.py` uses for downstream calls for the same reason. It adds no
+mechanism: the list holds krb5 and nothing else.
+
+Unchanged: the init flags, still without `delegate_to_peer` ([CL1]), and the
+server, whose NTLM screen ([C1]) is untouched.
+
+A workstation has this only once it runs the new bridge. The kit has to be
+republished and each workstation has to take it: `client/README.md`, "Taking a
+new bridge".
+
+*Verified:* 2026-11-17, from a Mac holding a ticket and four NTLM credentials
+from an SMB share. The changed bridge initialized against the live MCP server
+and listed its tools, where the bridge it replaces got 401. Its `--fetch`
+authenticated as the user at Gitea's and Jenkins' APIs. Hermetically,
+`test_mcp_krb_bridge::AsksForKerberosOnly`, against a fake whose SPNEGO offer
+lists NTLM the way GSS.framework's did. The pyspnego branch is tested only
+against a fake; it has not been run on a Windows host, where the kit runs the
+bridge inside WSL2 with python3-gssapi anyway.
+
 ---
 
 ## Threat model: a malicious or tampered client
@@ -950,7 +999,10 @@ suite runs anywhere with just `python3` (Windows, Linux, CI), no KDC.
 
 - `test_mcp_krb_bridge.py` - the client (`client/bridge/mcp-krb-bridge.py`): the
   stdio↔HTTP framing, a fresh token per call, session/protocol header handling,
-  and the [CL1] refusals (plaintext `http://` to a non-local host, no delegation).
+  the [CL1] refusals (plaintext `http://` to a non-local host, no delegation),
+  and [CL2]: the krb5 mech asked for by name, no NTLM in the token while the
+  workstation holds NTLM credentials, krb5-only SPNEGO framing, a non-krb5 token
+  refused, and pyspnego asked for Kerberos only.
 - `test_krb_git.py` - git from a host with no ticket: the authenticating proxy
   (`--git-listen`) request by request with the upstream faked, covering the
   realm suffix, the https upgrade, CONNECT and redirect refusals, the dropped
@@ -1018,6 +1070,7 @@ suite runs anywhere with just `python3` (Windows, Linux, CI), no KDC.
 | [S4-EDITOR] optional policy editor | `test_authz_editor`: disabled-by-default gate, policy-admin allowlist (separate from the editable policy), CSRF (Origin/Sec-Fetch/Content-Type), If-Match/ETag 412/428, schema-validation + fail-safe-to-last-good, merge-over-defaults, dispatcher lifespan passthrough. |
 | [D1] on-behalf-of forwarding | `test_delegation`: off by default, target allowlist, `MCP_DELEGATION_TARGETS` overlay parsing and its refusal to redirect an in-code row, and the finding-8 control (`ForwardedTgtIsRefused`, `NarrowEvidenceCheck`) with every unresolvable case failing closed. `test_tool_policy_invariant`: literal tool names at `forward_header`, `require()` first, no target row for a non-forwarding tool. `test_mcp_krb_bridge::NeverDelegates`: our own client stays on the narrow side. |
 | [CL1] no plaintext / no delegation | client tests: *http:// refused* (to a non-local host; loopback is deliberately allowed and the token never leaves the machine), *fresh token per call*, and `NeverDelegates`: *declared init flags exclude delegation* and *the context actually built requests none*. The second is not redundant: the first would miss a flag added at the call site rather than to `_INIT_FLAGS`. This row previously claimed a delegation test that did not exist; it was written when `-Forwardable` made the property load-bearing rather than incidental. |
+| [CL2] Kerberos only, never NTLM | `test_mcp_krb_bridge::AsksForKerberosOnly`: *the context it builds asks for krb5*, *no NTLM in the token while the workstation holds NTLM* (the DER OID `2b06010401823702020a` absent, and the [C1] base64 markers absent from the header), *the header is SPNEGO offering krb5 alone*, *a token that is not krb5 is refused*, *the Windows path asks pyspnego for Kerberos*. *The model reproduces the failure* keeps the second honest: the same fake, asked for SPNEGO as the old bridge did, does list NTLM. Live: from a Mac holding NTLM credentials, 2026-11-17 (see the finding). |
 | [SC1] client distribution | No test, because there is no control here to test. The client kit is unsigned by design; what protects it is HTTPS plus a CA pin, and both are properties of the transport and the operator's deployment rather than of code in this tree. [SC1] is an accepted risk, not a passing check: the finding carries the detail, rather than this row. |
 | [NG1] nginx hardening | No unit test: it is a config, verified on the host. `verify.sh` checks 6, 9, 10 and 12 cover the ACME exemption, the unauthenticated challenge, the authenticated round trip and the client files. The open item (missing security headers on the client-distribution block) is not caught by anything automated; see the finding. |
 | RFC 4559 §4 Negotiate challenge/header | `test_mcp_server`: *401 + WWW-Authenticate*; `test_mcp_krb_bridge`: *Authorization header is a `Negotiate ` token*. |

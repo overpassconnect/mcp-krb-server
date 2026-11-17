@@ -909,11 +909,17 @@ is the system Heimdal, the same library behind `kinit` and `klist`, so the bridg
 and the user's ticket share one credential cache and the Sonoma ccache-default
 change is invisible to it.
 
-What that linkage evidence is not: a smoke test. This path has not been exercised
-end to end against the MCP server from a Mac; the one untested step is a Heimdal
-SPNEGO initiator against the server's MIT acceptor, the same pairing every Mac
-that SSHes into a FreeIPA realm already exercises daily. Expected to work, not
-yet earned the word "supported".
+What that linkage evidence is not: a smoke test. The smoke test came later, on
+2026-11-17: a Heimdal krb5 initiator against the server's MIT acceptor, end to
+end from a Mac, `initialize` and `tools/list` through the bridge.
+
+The same day showed the one thing about a Mac that the bridge has to defend
+against. Mounting an SMB share in Finder leaves NTLM credentials in
+GSS.framework, and a SPNEGO request from then on offers NTLM beside krb5, which
+the server refuses. The bridge therefore asks for krb5 by name; see
+[Kerberos only, whatever the workstation holds](#kerberos-only-whatever-the-workstation-holds).
+`/System/Library/PrivateFrameworks/Heimdal.framework/Helpers/gsstool list` shows
+what a Mac holds, if a bridge older than that fix is still installed.
 
 ### Browsers on macOS
 
@@ -1025,6 +1031,22 @@ the safe side of that line, and adding `delegate_to_peer` would quietly convert
 every user of this bridge into the hostile-client case. See [CL1] and
 [D1] in [SECURITY.md](../SECURITY.md).
 
+### Kerberos only, whatever the workstation holds
+
+The bridge mints its token with the krb5 mechanism by name, never with SPNEGO,
+and on native Windows asks pyspnego for `protocol='kerberos'`. Asked for SPNEGO,
+the GSS library offers every mechanism the user holds credentials for. On a Mac
+that includes NTLM as soon as Finder has mounted an SMB share, and the server
+refuses any token that lists NTLM, so every request fails with 401 although the
+ticket is fine. Asked for krb5, the library has nothing else to offer.
+
+The token still goes out as SPNEGO: a NegTokenInit that offers krb5 alone and
+carries the krb5 token, the same framing the server uses for its own downstream
+calls. The MCP server and Gitea would take a bare krb5 token, but Jenkins
+answers one with HTTP 500, and `--fetch` may be pointed at any realm host. A
+token from the library that is not krb5 is refused before anything is sent.
+Tests assert both halves. See [CL2] in [SECURITY.md](../SECURITY.md).
+
 ### Registering it with Claude Code
 
 Three ways, in descending order of blast radius:
@@ -1057,11 +1079,46 @@ Docker Desktop.
   installed explicitly with `apt`. `setup.ps1` does this for you. If you are
   setting WSL up by hand, do it first or the bridge dies on `import gssapi`.
 - Windows devs run the bridge inside WSL2. On a non-domain-joined Windows
-  box, SSPI has no MIT ccache and falls back to NTLM, which the server rejects.
-  `pip install pyspnego` does not change that.
+  box, SSPI has no MIT ccache and no Kerberos credential to offer. The bridge
+  asks SSPI for Kerberos only, so that is a failure to authenticate, never an
+  NTLM token; `pip install pyspnego` does not change that.
 - Verified: the hermetic unit suite (`sh ../tests/run-tests.sh`, which prints
   the count, which is why none is written here) plus a live end-to-end run on real
   FreeIPA (bridge and server, including replay rejection).
+
+### Taking a new bridge
+
+A change to the bridge reaches a workstation in two steps, and neither happens
+by itself.
+
+1. **The kit is republished** at the download base the workstations use. On the
+   MCP host that is a re-run of `server/install/run.sh`, which lays the files
+   down at `CLIENT_PATH`; for an exported bundle it is a new `--client-export`
+   copied to wherever it is served; a deployment that publishes the download
+   files from CI does it with that job (`jenkins/Jenkinsfile.client-kit` is the
+   one this repository carries). Until then a workstation that re-runs its
+   installer gets the old bridge back.
+2. **Each workstation re-runs the command that provisioned it**, with the same
+   arguments. The provisioning page carries those commands. Every installer is
+   idempotent and replaces the bridge files in place:
+
+| Platform | Re-run | Replaces |
+|---|---|---|
+| Linux | `install-bridge.sh --base-url ... --mcp-url ...` (`setup.sh` runs it too) | `/opt/mcp-krb/`, atomically |
+| Windows | `setup.ps1` with the same `-BaseUrl`, `-McpUrl` and `-CaSha256` | `/opt/mcp-krb/` inside WSL2, through `install-bridge.sh` |
+| macOS | `setup-macos.sh` with the same `--base-url`, `--mcp-url` and `--ca-sha256` | the files under `~/Library/Application Support/mcp-krb/` |
+
+An MCP client keeps the bridge process it started, so reconnect its server
+entry afterwards (`/mcp` in Claude Code, or restart the client). `krb-fetch`,
+`krb-git` and `krb-put` start a new bridge on every run and need nothing.
+
+To see whether a workstation runs the published bridge, compare the two byte
+for byte:
+
+```sh
+curl --proto '=https' -fsS https://mcp.example.internal/client/mcp-krb-bridge.py \
+    | cmp - /opt/mcp-krb/mcp-krb-bridge.py && echo current
+```
 
 ## Fetching a file: `krb-fetch`
 

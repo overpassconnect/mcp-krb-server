@@ -13,7 +13,11 @@ Acceptor token convention (server tests craft these as base64):
     b'INCOMPLETE'        -> NOT complete (tests the [C1] completeness gate)
     anything else        -> raises GSSError (defective token)
 Initiator step() returns a deterministic token and records the context, so client
-tests can assert the service name / flags / fresh-per-call.
+tests can assert the service name / flags / mech / fresh-per-call. The token has
+the shape the real library gives for the mech asked for: a krb5
+InitialContextToken for krb5 (or no mech), and for SPNEGO a NegTokenInit whose
+mech list is built from WORKSTATION_MECHS, the credentials the user holds. Add
+_NTLM there to model a Mac after Finder mounted an SMB share.
 """
 contexts = []   # initiator contexts (client bridge tests)
 
@@ -47,6 +51,40 @@ class OID:
 _KRB5 = '1.2.840.113554.1.2.2'
 _SPNEGO = '1.3.6.1.5.5.2'
 _NTLM = '1.3.6.1.4.1.311.2.2.10'
+
+# The credentials the user holds, by mech. SPNEGO offers every one of them, krb5
+# first, which is what GSS.framework did on a Mac holding a ticket and the NTLM
+# credentials an SMB mount leaves behind (measured 2026-11-17).
+WORKSTATION_MECHS = [_KRB5]
+
+_OID_DER = {
+    _KRB5: bytes.fromhex('06092a864886f712010202'),
+    _SPNEGO: bytes.fromhex('06062b0601050502'),
+    _NTLM: bytes.fromhex('060a2b06010401823702020a'),
+}
+
+
+def _der(tag, payload):
+    n = len(payload)
+    if n < 0x80:
+        length = bytes((n,))
+    else:
+        b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+        length = bytes((0x80 | len(b),)) + b
+    return bytes((tag,)) + length + payload
+
+
+def _krb5_token(ap_req):
+    """RFC 4121 section 4.1: [APPLICATION 0] { krb5 OID, TOK_ID 01 00, AP-REQ }."""
+    return _der(0x60, _OID_DER[_KRB5] + b'\x01\x00' + ap_req)
+
+
+def _spnego_token(ap_req):
+    """A NegTokenInit offering every mech the workstation holds, with the krb5
+    token as the optimistic mechToken."""
+    mech_types = _der(0xA0, _der(0x30, b''.join(_OID_DER[m] for m in WORKSTATION_MECHS)))
+    mech_token = _der(0xA2, _der(0x04, _krb5_token(ap_req)))
+    return _der(0x60, _OID_DER[_SPNEGO] + _der(0xA0, _der(0x30, mech_types + mech_token)))
 
 
 class _NameType:
@@ -134,6 +172,7 @@ class SecurityContext:
         self.creds = creds
         self.usage = usage
         self.name = name
+        self.requested_mech = mech
         self.flags = list(flags) if flags else []
         SecurityContext._counter += 1
         self.serial = SecurityContext._counter
@@ -173,7 +212,12 @@ class SecurityContext:
             raise GSSError(
                 'Major (851968): Unspecified GSS failure.  Minor code may provide '
                 'more information, Minor (2529638925): KDC can\'t fulfill requested option')
-        return ('FAKE-AP-REQ:%s:%d' % (base, self.serial)).encode()
+        ap_req = ('FAKE-AP-REQ:%s:%d' % (base, self.serial)).encode()
+        if self.requested_mech == OID(_SPNEGO):
+            return _spnego_token(ap_req)
+        if self.requested_mech in (None, OID(_KRB5)):
+            return _krb5_token(ap_req)
+        raise GSSError('Major (65536): An unsupported mechanism was requested')
 
     @property
     def complete(self):
@@ -261,3 +305,4 @@ def reset():
     SecurityContext._counter = 0
     ALLOWED_TARGETS.clear()
     Credentials.INITIATE_LIFETIME = 86400
+    WORKSTATION_MECHS[:] = [_KRB5]

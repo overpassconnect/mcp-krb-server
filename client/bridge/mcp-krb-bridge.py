@@ -60,6 +60,56 @@ def log(*parts):
 NOAUTH = os.environ.get('MCP_KRB_NOAUTH') == '1'
 
 # --- Kerberos token minting -------------------------------------------------
+#
+# Kerberos only, asked for by name. SECURITY.md [CL2].
+#
+# The token is minted with the krb5 mechanism itself, never with SPNEGO. Asked
+# for SPNEGO, the GSS library builds its offer from every credential the user
+# holds, and what the user holds is the workstation's business, not ours. On a
+# Mac, Finder mounting an SMB share leaves NTLM credentials in GSS.framework, and
+# from then on every SPNEGO token lists NTLMSSP beside krb5. The server refuses
+# any token that names NTLM ([C1]), so one mounted share turned every request
+# into a 401. Asked for krb5 by name, the library has nothing to choose from.
+#
+# What leaves the machine is still a SPNEGO token, built here instead of by the
+# library: a NegTokenInit whose mech list is krb5 alone, carrying the krb5 token
+# as its mechToken. That is what SPNEGO itself emits once it has settled on
+# krb5, and the framing server/delegation.py uses for the same reason. A bare
+# krb5 token would satisfy the MCP server and Gitea, but a Java acceptor that
+# holds a SPNEGO-only credential, Jenkins among them, answers it with HTTP 500,
+# and --fetch may be pointed at any realm host.
+_KRB5_OID_DER = bytes.fromhex('06092a864886f712010202')      # 1.2.840.113554.1.2.2
+_SPNEGO_OID_DER = bytes.fromhex('06062b0601050502')          # 1.3.6.1.5.5.2
+
+
+def _der(tag, payload):
+    n = len(payload)
+    if n < 0x80:
+        length = bytes((n,))
+    else:
+        b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+        length = bytes((0x80 | len(b),)) + b
+    return bytes((tag,)) + length + payload
+
+
+def spnego_krb5_only(token):
+    """Frame a krb5 GSS token as a SPNEGO NegTokenInit that offers krb5 alone.
+
+    Refuses anything that is not a krb5 InitialContextToken (RFC 4121 section
+    4.1: [APPLICATION 0], then the krb5 mech OID), so a library that answered
+    with another mechanism's token is stopped here instead of sent."""
+    token = bytes(token or b'')
+    if len(token) > 2 and token[0] == 0x60:
+        start = 2 + (token[1] & 0x7F if token[1] & 0x80 else 0)
+        if token[start:start + len(_KRB5_OID_DER)] == _KRB5_OID_DER:
+            mech_types = _der(0xA0, _der(0x30, _KRB5_OID_DER))
+            mech_token = _der(0xA2, _der(0x04, token))
+            return _der(0x60, _SPNEGO_OID_DER
+                        + _der(0xA0, _der(0x30, mech_types + mech_token)))
+    raise RuntimeError('the Kerberos library returned a token that is not krb5; '
+                       'refusing to send it')
+
+
 if NOAUTH:
     def check_credentials():
         pass
@@ -70,7 +120,7 @@ else:
     try:
         import gssapi
 
-        _SPNEGO_OID = gssapi.OID.from_int_seq('1.3.6.1.5.5.2')
+        _KRB5_MECH = gssapi.OID.from_int_seq('1.2.840.113554.1.2.2')   # [CL2]
         # Explicitly without delegate_to_peer: never forward the user's TGT to the
         # server, so a compromised server cannot impersonate the user onward. This
         # equals python-gssapi's safe default; stated explicitly for auditability.
@@ -96,9 +146,9 @@ else:
 
         def negotiate_header(host):
             name = gssapi.Name('HTTP@' + host, gssapi.NameType.hostbased_service)
-            ctx = gssapi.SecurityContext(name=name, usage='initiate', mech=_SPNEGO_OID,
+            ctx = gssapi.SecurityContext(name=name, usage='initiate', mech=_KRB5_MECH,
                                          flags=_INIT_FLAGS)
-            return 'Negotiate ' + base64.b64encode(ctx.step()).decode()
+            return 'Negotiate ' + base64.b64encode(spnego_krb5_only(ctx.step())).decode()
 
     except ImportError:
         try:
@@ -108,8 +158,10 @@ else:
                 pass  # SSPI draws from the interactive logon session
 
             def negotiate_header(host):
-                ctx = spnego.client(hostname=host, service='HTTP')
-                return 'Negotiate ' + base64.b64encode(ctx.step()).decode()
+                # Kerberos only here too, [CL2]: the default 'negotiate' would
+                # let SSPI fall back to NTLM.
+                ctx = spnego.client(hostname=host, service='HTTP', protocol='kerberos')
+                return 'Negotiate ' + base64.b64encode(spnego_krb5_only(ctx.step())).decode()
 
         except ImportError:
             log('missing Kerberos support: install python3-gssapi (Linux), '
