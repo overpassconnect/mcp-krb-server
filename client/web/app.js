@@ -63,6 +63,14 @@
     '__CA_ARG__': (SITE.caInstall === false)
       ? '--skip-ca'
       : '--ca-sha256 ' + (SITE.caSha256 || '<set caSha256 in config.js>'),
+    /* A Linux machine about to enrol trusts nothing the realm CA signed yet,
+     * so its CA stanza fetches the certificate and checks the hash, and these
+     * two hand the checked file on: to curl for the first download, and to
+     * ipa-client-install, which would otherwise fetch the CA again over plain
+     * HTTP and check nothing. Without the stanza there is no file to hand on,
+     * so with caInstall false both are empty. */
+    '__CA_CURL_ARG__': (SITE.caInstall === false) ? '' : '--cacert realm-ca.crt',
+    '__CA_ENROL_ARG__': (SITE.caInstall === false) ? '' : '--ca-cert-file="$PWD/realm-ca.crt"',
     '__DNS_IP__': SITE.dnsIp || '<set dnsIp in config.js>',
     /* On-behalf-of forwarding needs the caller's own ticket to be forwardable,
      * and the installers write that line of krb5.conf off by default, which is

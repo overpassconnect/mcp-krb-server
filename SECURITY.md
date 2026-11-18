@@ -199,6 +199,15 @@ What the clients actually do now.
 - Artifacts are fetched over HTTPS from the publishing host. The scripts
   still never pipe a download to a shell: `install-bridge.sh` is written to a file and
   then executed, so there is no window in which a truncated download runs.
+- The first download, `setup.sh` on Linux and `setup.ps1` on Windows, happens
+  before the machine trusts the realm CA, while the publisher's certificate is
+  issued by it, so it cannot rest on the system trust store. The provisioning
+  page fetches the realm CA over plain HTTP and pins that download to it (`curl
+  --cacert`, `curl.exe --cacert` on Windows) only when its SHA-256 matches the
+  value delivered out of band. On Linux `--ca-cert-file` hands the same copy to
+  `ipa-client-install`, which in its one-time-password mode otherwise fetches the
+  CA over plain HTTP and checks nothing. macOS trusts the checked CA before its
+  download, as it already did.
 - On an enrolled Linux host the TLS leg is pinned to the realm CA
   (`/etc/ipa/ca.crt`), which `ipa-client-install` has just placed there. That
   narrows the hop from "any public CA" to "the CA this host was enrolled against".
@@ -246,10 +255,12 @@ Deployment obligations (yours, not the code's).
 1. Treat the publishing host as a fleet-wide root-code-execution dependency. It is
    one. Give it the custody, patch cadence, access control and monitoring you give
    the KDC. This is the compensating control, and it is operational, not technical.
-2. Deliver `-CaSha256` out of band (MDM, Intune parameter, kickstart, printed
-   handout) for every Windows workstation. Read it once from an enrolled host with
-   `sha256sum /etc/ipa/ca.crt`. Unpinned means the CA is not installed, which
-   makes the MCP step fail closed rather than trust-on-first-use.
+2. Deliver the realm CA's SHA-256 out of band (MDM, Intune parameter, kickstart,
+   printed handout) for every workstation: it is `-CaSha256` on Windows, and on
+   Linux and macOS the provisioning page checks the CA against it before the first
+   download. Read it once from an enrolled host with `sha256sum /etc/ipa/ca.crt`.
+   On Windows, unpinned means the CA is not installed, which makes the MCP step
+   fail closed rather than trust-on-first-use.
 3. If you serve the bundle from a separate host (`--no-serve-client` plus an exported
    copy), prefer one whose certificate chains to the realm CA, so the Linux pin
    actually holds instead of falling back. The default, the MCP host serving the

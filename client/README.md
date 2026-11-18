@@ -151,15 +151,19 @@ The TLS leg is narrowed where it can be:
 
 | Platform | What pins the TLS leg |
 |---|---|
+| Linux, not yet enrolled | the download of `setup.sh` itself: a copy of the realm CA fetched over plain HTTP and checked against its SHA-256, delivered out of band, which `--ca-cert-file` then hands to `ipa-client-install` |
 | Linux, already enrolled | the realm CA at `/etc/ipa/ca.crt`, which `ipa-client-install` put there |
-| Windows (WSL) | the realm CA is installed by the script into WSL's trust store and Windows' machine trust store, pinned by SHA-256 via `-CaSha256`, delivered out of band |
+| Windows (WSL) | the download of `setup.ps1` itself: the same checked copy, through `curl.exe --cacert`. After that the realm CA is installed by the script into WSL's trust store and Windows' machine trust store, pinned by SHA-256 via `-CaSha256` |
 
-WSL is never enrolled in the realm, so it starts with no realm CA at all. That is
-why the Windows path needs the hash and the Linux path does not, and it is why
-`-CaSha256` is the only value you still have to deliver out of band.
+The first download is the hard one. The publisher's certificate is issued by the
+realm CA, and a machine that is not enrolled yet has no realm CA at all, so TLS to
+the publisher cannot succeed until the CA arrives by another route. That route is
+plain HTTP, made safe by the hash. WSL is never enrolled, so the Windows path needs
+the hash throughout; a Linux machine needs it once, for the download that comes
+before enrolment.
 
-`-CaSha256` is the only value here that is not simply trusted from the host serving
-the files. `JsoncEdit.ps1` is fetched on plain TLS, the same trust
+The realm CA's SHA-256 is the only value here that is not simply trusted from the
+host serving the files. `JsoncEdit.ps1` is fetched on plain TLS, the same trust
 `install-bridge.sh` gets before running as root.
 
 What this does not defend against, stated plainly: a compromised publisher can
@@ -190,15 +194,26 @@ command. Arguments it does not recognise are passed through to
 ipa host-add newbox.example.internal --random        # prints an OTP
 
 # on the new machine
-curl --proto '=https' --tlsv1.2 -fsS \
-    https://mcp.example.internal/client/setup.sh -o /tmp/s.sh
-sh /tmp/s.sh \
+cd "$(mktemp -d)"
+curl -fsS -o realm-ca.crt http://ipa.example.internal/ipa/config/ca.crt
+echo "<SHA-256 of the realm CA>  realm-ca.crt" | sha256sum -c - &&
+curl --proto '=https' --tlsv1.2 -fsS --cacert realm-ca.crt \
+    https://mcp.example.internal/client/setup.sh -o setup.sh
+sh setup.sh \
     --base-url https://mcp.example.internal/client \
     --mcp-url  https://mcp.example.internal/ \
     --hostname=newbox.example.internal \
     --server=ipa.example.internal --domain=example.internal \
-    --realm=EXAMPLE.INTERNAL --password='<OTP>' --unattended
+    --realm=EXAMPLE.INTERNAL --password='<OTP>' --unattended \
+    --ca-cert-file="$PWD/realm-ca.crt"
 ```
+
+The first three lines are there because the publisher's certificate is issued by
+the realm CA, which this machine does not trust yet. The CA comes over plain HTTP,
+and the `&&` lets the download run only when its SHA-256 matches the value you read
+from an enrolled host (`sha256sum /etc/ipa/ca.crt`). `--ca-cert-file` hands the
+same file to `ipa-client-install`, which would otherwise fetch the CA over plain
+HTTP itself and check nothing.
 
 Those `https://mcp.example.internal/client/...` URLs are the default: the MCP host
 serves the kit at `/client`. If you exported the bundle and serve it from another
@@ -214,7 +229,7 @@ piped straight to a shell has already run half of itself.
 client to a later run. Idempotent: an already-enrolled host skips
 `ipa-client-install`, and re-running replaces a stale shim.
 
-Enrolment runs first, so by the time anything is downloaded the machine has
+Enrolment runs first, so by the time anything else is downloaded the machine has
 `/etc/ipa/ca.crt` and the download leg is pinned to the realm CA. If the
 publisher's certificate does not chain to it, the fetch says so and falls back to
 the system trust store. That warning matters: with the pin gone that leg rests on
@@ -377,8 +392,17 @@ The script therefore fetches the realm CA into WSL's trust store
 endpoint and cannot be a trusted channel: WSL has no realm anchor yet, so there is
 by construction nothing for TLS to validate the CA against. This is why the
 transport cannot be the control and `-CaSha256` is the pin, delivered out of band.
-A copy of `setup.ps1` downloaded from the publisher already carries the pin.
-Running the script straight out of the repo checkout does not, so pass it.
+The provisioning page's command passes it, filled in from the deployment's config, so
+check that value against `sha256sum /etc/ipa/ca.crt` on an enrolled host before
+running it.
+
+The same hash first gets `setup.ps1` itself onto the machine. The publisher's
+certificate is issued by the realm CA, which a fresh Windows does not trust, so the
+page's command fetches the CA over plain HTTP and downloads `setup.ps1` only when
+its SHA-256 matches, with `curl.exe --cacert` pinned to that copy. It calls
+`curl.exe` by that name because in Windows PowerShell plain `curl` means
+`Invoke-WebRequest`, which checks Windows' store alone, and that store is the
+script's to change, as below.
 
 The same CA then goes into Windows' own trust store, `Cert:\LocalMachine\Root`,
 because nothing that runs on Windows itself reads WSL's: any Windows program that

@@ -186,7 +186,11 @@
       </label>
     </div>
 <pre><code id="linux-cmd">cd "$(mktemp -d)"
-curl --proto '=https' --tlsv1.2 -fsS __BASE__/setup.sh -o setup.sh
+__CA_BEGIN__
+curl -fsS -o realm-ca.crt http://__KDC__/ipa/config/ca.crt
+echo "__CA_SHA256__  realm-ca.crt" | sha256sum -c - &amp;&amp;
+__CA_END__
+curl --proto '=https' --tlsv1.2 -fsS __CA_CURL_ARG__ __BASE__/setup.sh -o setup.sh
 
 sudo sh setup.sh \
     --base-url __BASE__ \
@@ -196,7 +200,7 @@ sudo sh setup.sh \
     --domain=__DOMAIN__ \
     --realm=__REALM__ \
     --password='&lt;OTP&gt;' \
-    --unattended</code></pre>
+    --unattended __CA_ENROL_ARG__</code></pre>
 
     <h3>Install, case 2: the machine is already enrolled</h3>
 <pre><code id="linux-cmd-enrolled">cd "$(mktemp -d)"
@@ -212,13 +216,25 @@ sudo sh install-bridge.sh \
     half-execute as root. <code>--proto '=https'</code> pins the transfer to HTTPS so a redirect
     cannot silently downgrade it to plaintext.</p>
 
+    <p class="note">The first block starts with the realm CA. The host serving these files
+    presents a certificate signed by the realm's own CA, and a machine that is not enrolled yet
+    has never heard of that CA, so without it the download fails TLS. The certificate itself is
+    fetched over plain <em>HTTP</em>, needing no trust, and the hash is what makes that safe:
+    the <code>&amp;&amp;</code> runs the download only when the certificate's SHA-256 matches,
+    and <code>--cacert</code> pins that download to it. <code>--ca-cert-file</code> then hands
+    the same file to <code>ipa-client-install</code>, which would otherwise fetch the CA over
+    plain HTTP itself and check nothing. The value is filled in for you, which proves nothing on
+    its own: this page comes from the same infrastructure as the certificate, so compare it
+    against the value your IT team gave you before you run it. On a mismatch it prints
+    <code>FAILED</code> and downloads nothing, so the <code>sudo</code> line finds no
+    <code>setup.sh</code> to run. Do not reach for <code>curl -k</code> to get past it.</p>
+
     <p class="note">TLS is the whole of the assurance on these bytes. There is no signature and
     no checksum file to verify. Once the machine is enrolled the scripts pin their own downloads
     to the realm CA at <code>/etc/ipa/ca.crt</code> and warn loudly if that pin ever falls back
-    to the public trust store, but the first fetch above is ordinary public-CA TLS. Whoever
-    controls the host serving these files decides what runs as root here: SECURITY.md&nbsp;[SC1].
-    If that is in your threat model, ship a signed package from an internal repo in your base
-    image instead.</p>
+    to the public trust store. Whoever controls the host serving these files decides what runs
+    as root here: SECURITY.md&nbsp;[SC1]. If that is in your threat model, ship a signed package
+    from an internal repo in your base image instead.</p>
 
     <p class="note">Extras: <code>--skip-mcp</code> enrols in FreeIPA only, leaving the bridge
     for later. Drop <code>--managed</code> from the second block to install the bridge without
@@ -260,8 +276,8 @@ sudo sh uninstall.sh --yes      # apply it</code></pre>
     the command below always does, so the script refuses to start without it.</p>
 
     <h3>Install</h3>
-    <p class="note">One command, one file to download. The realm values below are already filled
-    in for you, so the only thing to edit is your username.</p>
+    <p class="note">The realm values below are already filled in for you, so the only thing to
+    edit is your username.</p>
     <div class="fill" data-fill="win-cmd">
       <label>Your IPA username
         <input type="text" autocomplete="off" spellcheck="false"
@@ -271,11 +287,23 @@ sudo sh uninstall.sh --yes      # apply it</code></pre>
     </div>
 <pre><code id="win-cmd"># Run PowerShell as Administrator.
 $base = "__BASE__"
-iwr -useb "$base/setup.ps1" -OutFile setup.ps1
+cd (New-Item -ItemType Directory -Path "$env:TEMP\$(New-Guid)").FullName
+curl.exe -fsS -o realm-ca.crt "http://__KDC__/ipa/config/ca.crt"
+if ((Get-FileHash realm-ca.crt).Hash -eq '__CA_SHA256__') { curl.exe --proto '=https' --tlsv1.2 -fsS --cacert realm-ca.crt -o setup.ps1 "$base/setup.ps1" }
 
 .\setup.ps1 -IpaUser &lt;your-ipa-username&gt; `
     -Domain __DOMAIN__ -Realm __REALM__ -Kdc __KDC__ `
     -BaseUrl __BASE__ -McpUrl __MCP_URL__ -CaSha256 __CA_SHA256__ __FWD_PS__</code></pre>
+    <p class="note">The hash appears twice in the command. Check it against
+    <code>sha256sum /etc/ipa/ca.crt</code> on an enrolled host, or the value IT gave you, rather
+    than trusting the copy printed on this page: a hash read from the same page it is meant to
+    verify proves nothing. The first lines need it because the host serving these files
+    presents a certificate signed by the realm's own CA, which a fresh Windows does not trust
+    yet. They fetch the CA over plain HTTP and download <code>setup.ps1</code> only when its
+    SHA-256 matches, pinned to that CA with <code>--cacert</code>, into a new folder of its own.
+    On a mismatch nothing is downloaded, so <code>.\setup.ps1</code> has nothing to run.
+    <code>-CaSha256</code> hands the script the same value.</p>
+
     <p class="note">That sets up all three pieces: Kerberos SSH through WSL2, VS Code Remote-SSH
     with <code>remote.SSH.path</code> pointed at a dispatcher so <code>*.__DOMAIN__</code> goes
     through WSL while every other host keeps using the native Windows <code>ssh</code>, and the
@@ -324,15 +352,14 @@ krb-fetch &lt;url&gt; -o C:\path\file        # fetch from a Kerberized service (
     <p class="note">Check what you hold with <code>wslklist</code>. The flags show <code>F</code>
     when the ticket is forwardable.</p>
 
-    <p class="note">Take <code>-CaSha256</code> from <code>sha256sum /etc/ipa/ca.crt</code> on an
-    enrolled host, or from IT, rather than the copy printed on this page. It is what makes the
-    download verifiable, and a hash read from the same page it is meant to verify proves
-    nothing.</p>
-
-    <p class="note">The CA it pins goes into WSL's trust store and into Windows' own, for the
-    whole machine, because any Windows program that speaks HTTPS to a realm host checks
-    certificates against Windows' store and never reads WSL's. A run that cannot put it in
-    both stops with an error.</p>
+    <p class="note">The CA that <code>-CaSha256</code> pins goes into WSL's trust store and into
+    Windows' own, for the whole machine, because any Windows program that speaks HTTPS to a
+    realm host checks certificates against Windows' store and never reads WSL's. A run that
+    cannot put it in both stops with an error. The first lines of the command leave Windows'
+    store alone on purpose, which is why they call <code>curl.exe</code> by that name: in
+    Windows PowerShell plain <code>curl</code> means <code>Invoke-WebRequest</code>, which checks
+    Windows' store alone. <code>setup.ps1</code> records the CA it adds there, so the uninstall
+    takes out the kit's CA and leaves one that was trusted before.</p>
 
     <p class="note">It also installs Firefox inside WSL. That is not a preference: Windows holds
     no Kerberos ticket, so a Windows browser can never answer a <code>Negotiate</code> challenge

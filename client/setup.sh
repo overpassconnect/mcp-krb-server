@@ -3,13 +3,17 @@
 # command. Published at /client/setup.sh by the publisher.
 #
 #   on IPA:     ipa host-add newbox.example.internal --random   # prints an OTP
-#   on newbox:  curl -fsS https://mcp.example.internal/client/setup.sh -o /tmp/s.sh
-#               sh /tmp/s.sh \
+#   on newbox:  curl -fsS -o realm-ca.crt http://ipa.example.internal/ipa/config/ca.crt
+#               echo "<SHA-256 of the realm CA>  realm-ca.crt" | sha256sum -c - &&
+#               curl --proto '=https' --tlsv1.2 -fsS --cacert realm-ca.crt \
+#                 https://mcp.example.internal/client/setup.sh -o setup.sh
+#               sh setup.sh \
 #                 --base-url https://mcp.example.internal/client \
 #                 --mcp-url  https://mcp.example.internal/ \
 #                 --hostname=newbox.example.internal \
 #                 --server=ipa.example.internal --domain=example.internal \
-#                 --realm=EXAMPLE.INTERNAL --password='<OTP>' --unattended
+#                 --realm=EXAMPLE.INTERNAL --password='<OTP>' --unattended \
+#                 --ca-cert-file="$PWD/realm-ca.crt"
 #
 # Two URLs, two roles; they may be the same host:
 #   --base-url  the publisher directory serving install-bridge.sh and the
@@ -25,8 +29,14 @@
 # has a default: a missing one is knowable from argv alone, so it is refused
 # before anything is mutated.
 #
-# What authenticates the bytes: TLS, and nothing else. ipa-client-install runs
-# before anything is downloaded, so by fetch time /etc/ipa/ca.crt is the CA
+# What authenticates the bytes: TLS, and nothing else. This script is itself
+# downloaded before the machine trusts the realm CA, while the publisher's
+# certificate is normally issued by that CA, so that first download is pinned to
+# a copy of the CA fetched over plain HTTP and checked against a SHA-256
+# delivered out of band, as above; the provisioning page does the same.
+# --ca-cert-file hands that copy to ipa-client-install, which would otherwise
+# fetch the CA over plain HTTP itself and check nothing. Enrolment then runs
+# before anything else is downloaded, so by fetch time /etc/ipa/ca.crt is the CA
 # this host was just enrolled against, and every fetch below is pinned to it
 # with curl --cacert. That narrows the transport from "any public CA may vouch
 # for the publisher" to "the realm CA must", which takes public-CA mis-issuance
